@@ -1,213 +1,316 @@
-"""
-NVD ingestion module.
+"""NVD ingestion job — year-by-year processing into the silver layer.
 
-This script downloads NVD yearly JSON feeds, extracts the main CVE fields,
-and stores the cleaned dataset in Parquet format.
+This job downloads the NVD 2.0 yearly JSON feeds, extracts the fields
+the rest of the pipeline needs, and writes one Parquet partition per
+year under ``data/silver/nvd/year=YYYY/``.
+
+Why year-by-year
+----------------
+Each yearly NVD feed is ~150-200 MB JSON (multi-line, deeply nested).
+On an 8 GB RAM laptop, loading the full 12-year window at once and then
+exploding ``vulnerabilities`` into ~300 K rows of nested structs is on
+the edge of memory comfort. Processing one year per Spark action keeps
+the working set small, lets us write each year as a clean partition,
+and makes incremental re-runs trivial: bump the year, re-run, only that
+partition is rewritten.
+
+Output silver schema
+--------------------
+- ``cve_id``                  : string (uppercase, trimmed)
+- ``published``               : timestamp
+- ``last_modified``           : timestamp
+- ``published_year``          : int (year(published); equal to the feed year for most CVEs)
+- ``description``             : string (English description, primary)
+- ``cwes``                    : array<string> (all CWE-XXX values across all weaknesses, deduplicated)
+- ``cvss_score``              : double (fallback v4 → v3.1 → v3.0 → v2)
+- ``cvss_severity``           : string (matched fallback path)
+- ``cvss_version``            : string ("v4.0" | "v3.1" | "v3.0" | "v2" | null)
+- ``cpe_vendors``             : array<string> (deduplicated, from configurations)
+- ``cpe_products``            : array<string> (deduplicated, from configurations)
+- ``cpe_versions``            : array<string> (deduplicated, from CPE 2.3 version field)
+- ``reference_count``         : int
+- ``has_exploit_reference``   : boolean (any reference tagged "Exploit")
+
+Partitioned by: ``year`` (= the feed year, in the path).
 """
+
+from __future__ import annotations
 
 import argparse
-import gzip
-import os
-import shutil
-from typing import Iterable, List
+import logging
+import sys
+from pathlib import Path
+from typing import Iterable
 
-import requests
-from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql.functions import col, explode, expr, upper, trim
+# Allow plain-script execution: `spark-submit src/ingestion/ingest_nvd.py`
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql.functions import (
+    coalesce,
+    col,
+    explode,
+    expr,
+    lit,
+    size,
+    to_timestamp,
+    trim,
+    upper,
+    when,
+    year as spark_year,
+)
+
+from src.config import (  # noqa: E402  (after sys.path tweak)
+    DEFAULT_NVD_YEARS,
+    RAW_NVD_DIR,
+    RAW_NVD_JSON_DIR,
+    SILVER_NVD_DIR,
+    configure_logging,
+    create_spark_session,
+)
+from src.utils.http import download_file, gunzip_file  # noqa: E402
+
+
+logger = logging.getLogger(__name__)
 
 NVD_BASE_URL = "https://nvd.nist.gov/feeds/json/cve/2.0"
 
 
-def create_spark_session(app_name: str = "nvd-ingestion") -> SparkSession:
-    """Create the Spark session used by the ingestion job."""
-    spark = (
-        SparkSession.builder
-        .appName(app_name)
-        .config("spark.driver.memory", "6g")
-        .config("spark.executor.memory", "6g")
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("WARN")
-    return spark
+# ---------------------------------------------------------------------------
+# Download / extract
+# ---------------------------------------------------------------------------
+
+def nvd_url_for_year(year: int) -> str:
+    """Return the NVD 2.0 yearly feed URL for ``year``."""
+    return f"{NVD_BASE_URL}/nvdcve-2.0-{year}.json.gz"
 
 
-def download_file(url: str, output_path: str, chunk_size: int = 8192) -> None:
-    """Download a remote file and save it locally."""
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+def fetch_nvd_year(
+    year: int,
+    raw_dir: Path,
+    json_dir: Path,
+    force: bool = False,
+) -> Path:
+    """Download and extract one NVD year. Returns the extracted JSON path."""
+    gz_path = raw_dir / f"nvdcve-2.0-{year}.json.gz"
+    json_path = json_dir / f"nvdcve-2.0-{year}.json"
 
-    with requests.get(url, stream=True, timeout=120) as response:
-        response.raise_for_status()
-        with open(output_path, "wb") as file:
-            for chunk in response.iter_content(chunk_size=chunk_size):
-                if chunk:
-                    file.write(chunk)
-
-
-def gunzip_file(input_path: str, output_path: str) -> None:
-    """Extract a .gz file into a regular file."""
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-    with gzip.open(input_path, "rb") as file_in:
-        with open(output_path, "wb") as file_out:
-            shutil.copyfileobj(file_in, file_out)
+    download_file(nvd_url_for_year(year), gz_path, force=force)
+    gunzip_file(gz_path, json_path, force=force)
+    return json_path
 
 
-def download_nvd_years(
-    years: Iterable[int],
-    raw_dir: str,
-    json_dir: str,
-    force_download: bool = False,
-) -> List[str]:
-    """
-    Download and extract NVD yearly feeds.
+# ---------------------------------------------------------------------------
+# Spark transforms
+# ---------------------------------------------------------------------------
 
-    Returns the list of extracted JSON file paths.
-    """
-    os.makedirs(raw_dir, exist_ok=True)
-    os.makedirs(json_dir, exist_ok=True)
-
-    extracted_paths = []
-
-    for year in years:
-        gz_url = f"{NVD_BASE_URL}/nvdcve-2.0-{year}.json.gz"
-        gz_path = os.path.join(raw_dir, f"nvdcve-2.0-{year}.json.gz")
-        json_path = os.path.join(json_dir, f"nvdcve-2.0-{year}.json")
-
-        if force_download or not os.path.exists(gz_path):
-            print(f"Downloading NVD feed for {year}...")
-            download_file(gz_url, gz_path)
-        else:
-            print(
-                f"NVD compressed file for {year} already exists. Skipping download.")
-
-        if force_download or not os.path.exists(json_path):
-            print(f"Extracting NVD feed for {year}...")
-            gunzip_file(gz_path, json_path)
-        else:
-            print(
-                f"NVD JSON file for {year} already exists. Skipping extraction.")
-
-        extracted_paths.append(json_path)
-
-    return extracted_paths
-
-
-def load_nvd_raw(spark: SparkSession, json_dir: str) -> DataFrame:
-    """
-    Load NVD JSON files.
-
-    NVD feeds are multi-line JSON files, so multiLine must be enabled.
-    """
+def load_nvd_year(spark: SparkSession, json_path: Path) -> DataFrame:
+    """Read a single NVD yearly JSON file (multi-line)."""
     return (
         spark.read
         .option("multiLine", "true")
-        .json(os.path.join(json_dir, "*.json"))
+        .json(str(json_path))
     )
 
 
-def transform_nvd(nvd_raw: DataFrame) -> DataFrame:
-    """Extract relevant CVE fields from the nested NVD JSON structure."""
-    nvd_exploded = (
-        nvd_raw
+# CVSS extraction expressions, written once and reused inside transform_nvd_year.
+# NOTE: V2 stores baseSeverity at the metric level, NOT inside cvssData (V3+ moved it).
+_CVSS_SCORE_EXPR = (
+    "coalesce("
+    " metrics.cvssMetricV40[0].cvssData.baseScore,"
+    " metrics.cvssMetricV31[0].cvssData.baseScore,"
+    " metrics.cvssMetricV30[0].cvssData.baseScore,"
+    " metrics.cvssMetricV2[0].cvssData.baseScore"
+    ")"
+)
+_CVSS_SEVERITY_EXPR = (
+    "coalesce("
+    " metrics.cvssMetricV40[0].cvssData.baseSeverity,"
+    " metrics.cvssMetricV31[0].cvssData.baseSeverity,"
+    " metrics.cvssMetricV30[0].cvssData.baseSeverity,"
+    " metrics.cvssMetricV2[0].baseSeverity"  # <- v2 quirk: not under cvssData
+    ")"
+)
+
+# Flatten weaknesses[].description[].value -> array of CWE strings, dedup, drop nulls
+# and non-CWE markers like "NVD-CWE-Other" / "NVD-CWE-noinfo".
+_CWES_EXPR = (
+    "filter("
+    " array_distinct(flatten(transform(weaknesses, w -> transform(w.description, d -> d.value)))),"
+    " cwe -> cwe is not null and cwe like 'CWE-%'"
+    ")"
+)
+
+# Flatten configurations[].nodes[].cpeMatch[].criteria -> array of CPE 2.3 strings.
+# CPE 2.3 format: cpe:2.3:part:vendor:product:version:update:edition:lang:sw_ed:tgt_sw:tgt_hw:other
+# Index 3 = vendor, 4 = product, 5 = version.
+_CPE_FLAT_EXPR = (
+    "flatten(transform(configurations, c ->"
+    "  flatten(transform(c.nodes, n -> n.cpeMatch.criteria))"
+    "))"
+)
+
+
+def transform_nvd_year(df_raw: DataFrame, year: int) -> DataFrame:
+    """Project the raw NVD year DataFrame onto the silver schema."""
+    exploded = (
+        df_raw
         .select(explode(col("vulnerabilities")).alias("v"))
         .select("v.cve.*")
     )
 
-    nvd_df = (
-        nvd_exploded
+    silver = (
+        exploded
         .select(
             upper(trim(col("id"))).alias("cve_id"),
-            col("published"),
-            col("lastModified"),
+            to_timestamp(col("published")).alias("published"),
+            to_timestamp(col("lastModified")).alias("last_modified"),
             expr("descriptions[0].value").alias("description"),
-            expr("weaknesses[0].description[0].value").alias("cwe"),
-            expr("metrics.cvssMetricV31[0].cvssData.baseScore").alias(
-                "cvss_score"),
-            expr("metrics.cvssMetricV31[0].cvssData.baseSeverity").alias(
-                "cvss_severity"),
+            expr(_CWES_EXPR).alias("cwes"),
+            expr(_CVSS_SCORE_EXPR).cast("double").alias("cvss_score"),
+            expr(_CVSS_SEVERITY_EXPR).alias("cvss_severity"),
+            (
+                when(expr("metrics.cvssMetricV40[0].cvssData.baseScore is not null"), lit("v4.0"))
+                .when(expr("metrics.cvssMetricV31[0].cvssData.baseScore is not null"), lit("v3.1"))
+                .when(expr("metrics.cvssMetricV30[0].cvssData.baseScore is not null"), lit("v3.0"))
+                .when(expr("metrics.cvssMetricV2[0].cvssData.baseScore is not null"), lit("v2"))
+                .otherwise(lit(None).cast("string"))
+                .alias("cvss_version")
+            ),
+            expr(f"array_distinct(transform({_CPE_FLAT_EXPR}, cpe -> split(cpe, ':')[3]))").alias("cpe_vendors"),
+            expr(f"array_distinct(transform({_CPE_FLAT_EXPR}, cpe -> split(cpe, ':')[4]))").alias("cpe_products"),
+            expr(f"array_distinct(transform({_CPE_FLAT_EXPR}, cpe -> split(cpe, ':')[5]))").alias("cpe_versions"),
+            (
+                when(col("references").isNull(), lit(0))
+                .otherwise(size(col("references")))
+                .alias("reference_count")
+            ),
+            coalesce(
+                expr("exists(references, r -> array_contains(r.tags, 'Exploit'))"),
+                lit(False),
+            ).alias("has_exploit_reference"),
         )
+        .withColumn("published_year", spark_year(col("published")))
     )
 
-    return nvd_df
+    return silver
 
+
+# ---------------------------------------------------------------------------
+# Write
+# ---------------------------------------------------------------------------
+
+def write_year_partition(df: DataFrame, output_dir: Path, year: int) -> int:
+    """Write one year as a single partition: ``data/silver/nvd/year=YYYY/``.
+
+    Returns the row count written. Caches the DF so the count and the
+    write share a single pass over the source JSON.
+    """
+    target = output_dir / f"year={year}"
+    target.mkdir(parents=True, exist_ok=True)
+
+    df.cache()
+    try:
+        n_rows = df.count()
+        # Coalesce to a single file: a typical year is 30-60 K rows of small
+        # records, well below any sensible Parquet split point.
+        df.coalesce(1).write.mode("overwrite").parquet(str(target))
+    finally:
+        df.unpersist(blocking=True)
+
+    return n_rows
+
+
+# ---------------------------------------------------------------------------
+# Job entry
+# ---------------------------------------------------------------------------
 
 def run_nvd_ingestion(
     spark: SparkSession,
     years: Iterable[int],
-    raw_dir: str = "data/prod/raw/nvd",
-    json_dir: str = "data/prod/raw/nvd_json",
-    output_path: str = "data/prod/silver/nvd",
+    raw_dir: Path = RAW_NVD_DIR,
+    json_dir: Path = RAW_NVD_JSON_DIR,
+    output_dir: Path = SILVER_NVD_DIR,
     force_download: bool = False,
-) -> DataFrame:
-    """
-    Run the full NVD ingestion process:
-    download -> extract -> load -> transform -> write parquet.
-    """
-    download_nvd_years(
-        years=years,
-        raw_dir=raw_dir,
-        json_dir=json_dir,
-        force_download=force_download,
-    )
+) -> int:
+    """Run the year-by-year NVD ingestion. Returns total rows written."""
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    json_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    nvd_raw = load_nvd_raw(spark, json_dir)
-    nvd_df = transform_nvd(nvd_raw)
+    years_list = list(years)
+    logger.info("NVD ingestion starting for years: %s", years_list)
 
-    print(f"Writing NVD silver dataset to: {output_path}")
-    nvd_df.write.mode("overwrite").parquet(output_path)
+    total_rows = 0
+    for year in years_list:
+        logger.info("[year %d] downloading + extracting", year)
+        json_path = fetch_nvd_year(year, raw_dir, json_dir, force=force_download)
 
-    print("NVD ingestion completed.")
-    print(f"Rows written: {nvd_df.count()}")
+        logger.info("[year %d] reading and transforming", year)
+        df_raw = load_nvd_year(spark, json_path)
+        df_silver = transform_nvd_year(df_raw, year)
 
-    return nvd_df
+        logger.info("[year %d] writing silver partition", year)
+        n_rows = write_year_partition(df_silver, output_dir, year)
+        total_rows += n_rows
+        logger.info("[year %d] done (%d rows)", year, n_rows)
+
+    logger.info("NVD ingestion completed: %d rows across %d year(s)",
+                total_rows, len(years_list))
+    return total_rows
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments for standalone execution."""
+    """Parse CLI arguments."""
     parser = argparse.ArgumentParser(
-        description="Ingest NVD vulnerability feeds.")
+        description="Ingest NVD vulnerability feeds (year-by-year)."
+    )
     parser.add_argument(
         "--years",
         nargs="+",
         type=int,
-        default=[2024, 2025, 2026],
-        help="NVD feed years to download and process.",
+        default=DEFAULT_NVD_YEARS,
+        help=f"NVD feed years to process. Default: {DEFAULT_NVD_YEARS}",
     )
-    parser.add_argument(
-        "--raw-dir",
-        default="data/prod/raw/nvd",
-        help="Directory for compressed NVD files.",
-    )
-    parser.add_argument(
-        "--json-dir",
-        default="data/prod/raw/nvd_json",
-        help="Directory for extracted NVD JSON files.",
-    )
-    parser.add_argument(
-        "--output-path",
-        default="data/prod/silver/nvd",
-        help="Output Parquet path for the cleaned NVD dataset.",
-    )
+    parser.add_argument("--raw-dir", type=Path, default=RAW_NVD_DIR)
+    parser.add_argument("--json-dir", type=Path, default=RAW_NVD_JSON_DIR)
+    parser.add_argument("--output-dir", type=Path, default=SILVER_NVD_DIR)
     parser.add_argument(
         "--force-download",
         action="store_true",
-        help="Force re-download and re-extraction even if files already exist.",
+        help="Re-download and re-extract even if local files already exist.",
+    )
+    parser.add_argument(
+        "--driver-memory",
+        default="3g",
+        help="Spark driver memory. Default: 3g (tuned for 8 GB RAM).",
     )
     return parser.parse_args()
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Entry point for ``python -m src.ingestion.ingest_nvd`` and ``spark-submit``."""
+    configure_logging()
     args = parse_args()
-    spark_session = create_spark_session()
 
-    run_nvd_ingestion(
-        spark=spark_session,
-        years=args.years,
-        raw_dir=args.raw_dir,
-        json_dir=args.json_dir,
-        output_path=args.output_path,
-        force_download=args.force_download,
+    spark = create_spark_session(
+        app_name="nvd-ingestion",
+        driver_memory=args.driver_memory,
     )
+    try:
+        run_nvd_ingestion(
+            spark=spark,
+            years=args.years,
+            raw_dir=args.raw_dir,
+            json_dir=args.json_dir,
+            output_dir=args.output_dir,
+            force_download=args.force_download,
+        )
+    finally:
+        spark.stop()
 
-    spark_session.stop()
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,70 @@
+# =============================================================================
+# Vulnerability Intelligence Platform — .gitignore
+# =============================================================================
+
+# ---- Data (NEVER commit; raw/silver/gold can be hundreds of MB) ------------
+data/
+*.parquet
+*.crc
+
+# ---- Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+.installed.cfg
+.python-version
+
+# ---- Virtual environments --------------------------------------------------
+venv/
+.venv/
+env/
+.env
+
+# ---- Test / coverage / type checkers ---------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+
+# ---- Notebooks (project does not ship notebooks; ignore stragglers) --------
+.ipynb_checkpoints/
+*.ipynb
+
+# ---- IDEs ------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ---- OS --------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+
+# ---- Spark scratch / logs --------------------------------------------------
+spark-warehouse/
+metastore_db/
+derby.log
+*.log
+logs/
+
+# ---- Airflow (only relevant if Session 8 is enabled) -----------------------
+airflow.db
+airflow.cfg
+airflow-webserver.pid
+webserver_config.py
+standalone_admin_password.txt
+dags/__pycache__/
+plugins/__pycache__/
+
+# ---- Project-specific scratch ----------------------------------------------
+scratch/
+tmp/
+*.bak

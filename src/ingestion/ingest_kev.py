@@ -1,74 +1,75 @@
-"""
-CISA KEV ingestion module.
+"""CISA KEV ingestion job — full snapshot CSV into silver Parquet.
 
-This script downloads the Known Exploited Vulnerabilities catalog,
-normalizes its schema, and stores the cleaned dataset in Parquet format.
+The Known Exploited Vulnerabilities catalog is a single CSV file
+republished by CISA whenever they add new entries (typically a few times
+per week, on US business hours). Volume is small (~1.5 K rows total),
+but it is **the** ground-truth signal of active exploitation — every
+downstream scoring step relies on it.
+
+Output silver schema
+--------------------
+- ``cve_id``                          : string (uppercase, trimmed)
+- ``vendor_project``                  : string
+- ``product``                         : string
+- ``vulnerability_name``              : string
+- ``kev_date_added``                  : date (ISO 8601 from CISA)
+- ``short_description``               : string
+- ``required_action``                 : string
+- ``known_ransomware_campaign_use``   : string ("Known" / "Unknown" / etc., raw text)
+- ``is_ransomware``                   : boolean (true iff known_ransomware_campaign_use == "Known")
 """
+
+from __future__ import annotations
 
 import argparse
-import os
+import logging
+import sys
+from pathlib import Path
 
-import requests
+# Allow plain-script execution: `spark-submit src/ingestion/ingest_kev.py`
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql.functions import col, trim, upper
+from pyspark.sql.functions import col, lower, to_date, trim, upper, when
+
+from src.config import (  # noqa: E402
+    RAW_KEV_DIR,
+    RAW_KEV_FILE,
+    SILVER_KEV_DIR,
+    configure_logging,
+    create_spark_session,
+)
+from src.utils.http import download_file  # noqa: E402
 
 
-KEV_CSV_URL = "https://www.cisa.gov/sites/default/files/csv/known_exploited_vulnerabilities.csv"
+logger = logging.getLogger(__name__)
+
+KEV_CSV_URL = (
+    "https://www.cisa.gov/sites/default/files/csv/known_exploited_vulnerabilities.csv"
+)
 
 
-def create_spark_session(app_name: str = "kev-ingestion") -> SparkSession:
-    """Create the Spark session used by the ingestion job."""
-    spark = (
-        SparkSession.builder
-        .appName(app_name)
-        .config("spark.driver.memory", "4g")
-        .config("spark.executor.memory", "4g")
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("WARN")
-    return spark
+# ---------------------------------------------------------------------------
+# Spark transforms
+# ---------------------------------------------------------------------------
 
-
-def download_file(url: str, output_path: str, chunk_size: int = 8192) -> None:
-    """Download a remote file and save it locally."""
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-    with requests.get(url, stream=True, timeout=120) as response:
-        response.raise_for_status()
-        with open(output_path, "wb") as file:
-            for chunk in response.iter_content(chunk_size=chunk_size):
-                if chunk:
-                    file.write(chunk)
-
-
-def download_kev_catalog(raw_path: str, force_download: bool = True) -> str:
-    """
-    Download the latest KEV CSV catalog.
-
-    KEV is published as a full snapshot, so overwriting the local file is fine.
-    """
-    if force_download or not os.path.exists(raw_path):
-        print("Downloading CISA KEV catalog...")
-        download_file(KEV_CSV_URL, raw_path)
-    else:
-        print("KEV raw file already exists. Skipping download.")
-
-    return raw_path
-
-
-def load_kev_raw(spark: SparkSession, raw_path: str) -> DataFrame:
-    """Load the raw KEV CSV file with Spark."""
+def load_kev_raw(spark: SparkSession, raw_path: Path) -> DataFrame:
+    """Read the raw KEV CSV with header inference."""
     return (
         spark.read
         .option("header", True)
         .option("inferSchema", True)
-        .csv(raw_path)
+        .option("multiLine", True)        # some descriptions wrap across lines
+        .option("escape", '"')
+        .csv(str(raw_path))
     )
 
 
 def transform_kev(kev_raw: DataFrame) -> DataFrame:
-    """Normalize KEV column names and keep the fields used downstream."""
-    kev_df = (
+    """Normalize KEV column names and types into the silver schema."""
+    return (
         kev_raw
         .withColumnRenamed("cveID", "cve_id")
         .withColumnRenamed("vendorProject", "vendor_project")
@@ -78,75 +79,104 @@ def transform_kev(kev_raw: DataFrame) -> DataFrame:
         .withColumnRenamed("requiredAction", "required_action")
         .withColumnRenamed("knownRansomwareCampaignUse", "known_ransomware_campaign_use")
         .withColumn("cve_id", upper(trim(col("cve_id"))))
+        .withColumn("kev_date_added", to_date(col("kev_date_added"), "yyyy-MM-dd"))
+        # is_ransomware: CISA fills "Known" / "Unknown" (case-insensitive in practice).
+        # Anything not exactly "Known" -> False.
+        .withColumn(
+            "is_ransomware",
+            when(lower(trim(col("known_ransomware_campaign_use"))) == "known", True)
+            .otherwise(False),
+        )
+        .select(
+            "cve_id",
+            "vendor_project",
+            "product",
+            "vulnerability_name",
+            "kev_date_added",
+            "short_description",
+            "required_action",
+            "known_ransomware_campaign_use",
+            "is_ransomware",
+        )
     )
 
-    return kev_df.select(
-        "cve_id",
-        "vendor_project",
-        "product",
-        "vulnerability_name",
-        "kev_date_added",
-        "short_description",
-        "required_action",
-        "known_ransomware_campaign_use",
-    )
 
+# ---------------------------------------------------------------------------
+# Job entry
+# ---------------------------------------------------------------------------
 
 def run_kev_ingestion(
     spark: SparkSession,
-    raw_path: str = "data/prod/raw/kev/known_exploited_vulnerabilities.csv",
-    output_path: str = "data/prod/silver/kev",
-    force_download: bool = True,
-) -> DataFrame:
-    """
-    Run the full KEV ingestion process:
-    download -> load -> transform -> write parquet.
-    """
-    download_kev_catalog(raw_path=raw_path, force_download=force_download)
+    raw_path: Path = RAW_KEV_FILE,
+    output_dir: Path = SILVER_KEV_DIR,
+    force_download: bool = False,
+) -> int:
+    """Run the full KEV ingestion job. Returns row count written."""
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
+    logger.info("Fetching KEV catalog")
+    download_file(KEV_CSV_URL, raw_path, force=force_download)
+
+    logger.info("Reading raw KEV CSV")
     kev_raw = load_kev_raw(spark, raw_path)
-    kev_df = transform_kev(kev_raw)
 
-    print(f"Writing KEV silver dataset to: {output_path}")
-    kev_df.write.mode("overwrite").parquet(output_path)
+    logger.info("Normalizing KEV columns")
+    kev_silver = transform_kev(kev_raw)
 
-    print("KEV ingestion completed.")
-    print(f"Rows written: {kev_df.count()}")
-    print(f"Distinct CVEs: {kev_df.select('cve_id').distinct().count()}")
+    kev_silver.cache()
+    try:
+        n_rows = kev_silver.count()
+        n_distinct = kev_silver.select("cve_id").distinct().count()
+        kev_silver.coalesce(1).write.mode("overwrite").parquet(str(output_dir))
+    finally:
+        kev_silver.unpersist(blocking=True)
 
-    return kev_df
+    logger.info(
+        "KEV ingestion completed: %d rows, %d distinct CVEs -> %s",
+        n_rows, n_distinct, output_dir,
+    )
+    return n_rows
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments for standalone execution."""
-    parser = argparse.ArgumentParser(description="Ingest CISA KEV catalog.")
+    """Parse CLI arguments."""
+    parser = argparse.ArgumentParser(description="Ingest the CISA KEV catalog.")
+    parser.add_argument("--raw-path", type=Path, default=RAW_KEV_FILE)
+    parser.add_argument("--output-dir", type=Path, default=SILVER_KEV_DIR)
     parser.add_argument(
-        "--raw-path",
-        default="data/prod/raw/kev/known_exploited_vulnerabilities.csv",
-        help="Local path for the downloaded KEV CSV file.",
-    )
-    parser.add_argument(
-        "--output-path",
-        default="data/prod/silver/kev",
-        help="Output Parquet path for the cleaned KEV dataset.",
-    )
-    parser.add_argument(
-        "--skip-download",
+        "--force-download",
         action="store_true",
-        help="Use the existing local CSV file instead of downloading it again.",
+        help="Re-download even if a local CSV already exists.",
+    )
+    parser.add_argument(
+        "--driver-memory",
+        default="3g",
+        help="Spark driver memory. Default: 3g.",
     )
     return parser.parse_args()
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Entry point for ``python -m src.ingestion.ingest_kev`` and ``spark-submit``."""
+    configure_logging()
     args = parse_args()
-    spark_session = create_spark_session()
 
-    run_kev_ingestion(
-        spark=spark_session,
-        raw_path=args.raw_path,
-        output_path=args.output_path,
-        force_download=not args.skip_download,
+    # KEV is tiny — 2g is plenty even on the smallest dev box.
+    spark = create_spark_session(
+        app_name="kev-ingestion",
+        driver_memory=args.driver_memory,
     )
+    try:
+        run_kev_ingestion(
+            spark=spark,
+            raw_path=args.raw_path,
+            output_dir=args.output_dir,
+            force_download=args.force_download,
+        )
+    finally:
+        spark.stop()
 
-    spark_session.stop()
+
+if __name__ == "__main__":
+    main()
