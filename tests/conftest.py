@@ -7,9 +7,16 @@ spinning up a JVM per test is unbearable.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Iterator
+
+# On Windows, Spark's JVM spawns Python workers using the system `python` command,
+# which may resolve to the Microsoft Store stub instead of the active venv.
+# Pinning PYSPARK_PYTHON to sys.executable ensures the correct interpreter is used.
+os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
 
 import pytest
 from pyspark.sql import SparkSession

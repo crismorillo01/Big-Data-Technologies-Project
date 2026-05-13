@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -145,6 +147,27 @@ def build_steps(
 # Execution
 # ---------------------------------------------------------------------------
 
+def _find_spark_submit() -> str:
+    """Return the path to spark-submit, preferring the active venv.
+
+    On Windows, spark-submit ships as spark-submit.cmd inside the venv's
+    Scripts/ directory. subprocess.run cannot find .cmd files via plain
+    name lookup, so we resolve the full path here.
+    """
+    venv_bin = Path(sys.executable).parent
+    for name in ("spark-submit.cmd", "spark-submit"):
+        candidate = venv_bin / name
+        if candidate.exists():
+            return str(candidate)
+    found = shutil.which("spark-submit.cmd") or shutil.which("spark-submit")
+    if found:
+        return found
+    raise RuntimeError(
+        "spark-submit not found. Activate the project venv or add PySpark's "
+        "Scripts directory to PATH."
+    )
+
+
 def run_step(step: Step) -> bool:
     """Run one step. Returns True on success, False on script-not-found."""
     if not step.script_path.exists():
@@ -155,10 +178,18 @@ def run_step(step: Step) -> bool:
         return False
 
     logger.info("=== Step: %s (owner %s) ===", step.name, step.owner or "?")
-    cmd = ["spark-submit", str(step.script_path), *step.args]
+    spark_submit = _find_spark_submit()
+    cmd = [spark_submit, str(step.script_path), *step.args]
     logger.info("  command: %s", " ".join(cmd))
 
-    result = subprocess.run(cmd, cwd=str(_PROJECT_ROOT))
+    # Pass PYSPARK_PYTHON so the JVM spawns workers from the active venv,
+    # not the system Python (which on Windows may be the Store stub).
+    env = {
+        **os.environ,
+        "PYSPARK_PYTHON": sys.executable,
+        "PYSPARK_DRIVER_PYTHON": sys.executable,
+    }
+    result = subprocess.run(cmd, cwd=str(_PROJECT_ROOT), env=env)
     if result.returncode != 0:
         logger.error("[%s] FAILED with exit code %d", step.name, result.returncode)
         sys.exit(result.returncode)
