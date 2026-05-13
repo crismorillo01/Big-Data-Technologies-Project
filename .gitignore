@@ -68,3 +68,6 @@ plugins/__pycache__/
 scratch/
 tmp/
 *.bak
+
+# ---- Claude Code (AI assistant local files — never commit) -----------------
+.claude/
