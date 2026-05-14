@@ -15,7 +15,7 @@ import argparse
 import logging
 import sys
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 # Allow `spark-submit src/clustering/clustering.py` to find the src package.
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -32,6 +32,7 @@ from pyspark.ml.feature import (
     CountVectorizerModel,
     IDF,
     PCA,
+    PCAModel,
     RegexTokenizer,
     StopWordsRemover,
     VectorAssembler,
@@ -182,8 +183,14 @@ def build_numeric_features(df: DataFrame) -> DataFrame:
     return assembler.transform(df)
 
 
-def assemble_features(df: DataFrame, use_pca: bool = True, pca_k: int = 100) -> DataFrame:
-    """Combine TF-IDF, CWE, vendor, and numeric vectors into a single 'features' column."""
+def assemble_features(
+    df: DataFrame, use_pca: bool = True, pca_k: int = 100
+) -> Tuple[DataFrame, Optional[PCAModel]]:
+    """Combine TF-IDF, CWE, vendor, and numeric vectors into a single 'features' column.
+
+    Returns the transformed DataFrame and the fitted PCAModel (or None when PCA is skipped).
+    The PCAModel is needed downstream to invert centroids back to the original feature space.
+    """
     assembler = VectorAssembler(
         inputCols=["tfidf_features", "cwe_features", "vendor_features", "numeric_features"],
         outputCol="assembled_features",
@@ -197,10 +204,10 @@ def assemble_features(df: DataFrame, use_pca: bool = True, pca_k: int = 100) -> 
         df = pca_model.transform(df)
         _log.info("PCA total explained variance: %.3f",
                   pca_model.explainedVariance.toArray().sum())
+        return df, pca_model
     else:
         df = df.withColumnRenamed("assembled_features", "features")
-
-    return df
+        return df, None
 
 
 # ---------------------------------------------------------------------------
@@ -278,19 +285,31 @@ def train_final_model(df: DataFrame, best_k: int) -> Tuple[DataFrame, KMeansMode
 def extract_top_keywords(
     model: KMeansModel,
     vocabulary: List[str],
+    pca_model: Optional[PCAModel] = None,
     top_n: int = 10,
 ) -> List[List[str]]:
     """Map centroid TF-IDF weights back to vocabulary terms per cluster.
 
-    The assembled feature vector has layout:
-    [tfidf (vocab_size) | cwe (30) | vendor (30) | numeric (3)]
-    so the first len(vocabulary) dimensions correspond to TF-IDF weights.
+    Without PCA the assembled feature vector is:
+      [tfidf (vocab_size) | cwe (30) | vendor (30) | numeric (3)]
+    so centroid[:vocab_size] directly gives TF-IDF weights.
+
+    With PCA the centroid is in the reduced k-dimensional space.
+    pca_model.pc has shape (n_original_features, pca_k), so
+      centroid_original ≈ pc @ centroid_pca
+    reconstructs the approximate original-space centroid, whose first
+    vocab_size entries are the TF-IDF weights.
     """
     centroids = model.clusterCenters()
     vocab_size = len(vocabulary)
+    if pca_model is not None:
+        pc = pca_model.pc.toArray()  # shape (n_original_features, pca_k)
     result = []
     for centroid in centroids:
-        tfidf_weights = centroid[:vocab_size]
+        if pca_model is not None:
+            tfidf_weights = (pc @ centroid)[:vocab_size]
+        else:
+            tfidf_weights = centroid[:vocab_size]
         top_indices = np.argsort(tfidf_weights)[::-1][:top_n]
         result.append([vocabulary[i] for i in top_indices])
     return result
@@ -301,11 +320,12 @@ def build_cluster_topics(
     predictions_df: DataFrame,
     model: KMeansModel,
     vocabulary: List[str],
+    pca_model: Optional[PCAModel] = None,
     top_n_keywords: int = 10,
     top_n_meta: int = 5,
 ) -> DataFrame:
     """Build the cluster_topics DataFrame."""
-    keywords_per_cluster = extract_top_keywords(model, vocabulary, top_n_keywords)
+    keywords_per_cluster = extract_top_keywords(model, vocabulary, pca_model, top_n_keywords)
     k = len(keywords_per_cluster)
 
     cluster_agg = predictions_df.groupBy("cluster_id").agg(
@@ -396,14 +416,14 @@ def run_clustering(
     df, cv_model = build_tfidf(df, vocab_size, min_df)
     df = build_categorical_features(df)
     df = build_numeric_features(df)
-    df = assemble_features(df, use_pca=use_pca, pca_k=pca_k)
+    df, pca_model = assemble_features(df, use_pca=use_pca, pca_k=pca_k)
     df.cache()
 
     metrics = evaluate_k_values(df, k_values)
     best_k = select_best_k(metrics)
 
     predictions_df, model = train_final_model(df, best_k)
-    topics_df = build_cluster_topics(spark, predictions_df, model, cv_model.vocabulary)
+    topics_df = build_cluster_topics(spark, predictions_df, model, cv_model.vocabulary, pca_model)
 
     save_outputs(spark, full_df, predictions_df, topics_df, metrics)
     df.unpersist()

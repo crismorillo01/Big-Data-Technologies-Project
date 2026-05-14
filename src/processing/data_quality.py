@@ -52,25 +52,28 @@ def load_master(spark: SparkSession, snapshot_date: str) -> DataFrame:
 
 
 def compute_summary_metrics(df: DataFrame, snapshot_date: str) -> DataFrame:
-    """Compute a single-row summary of quality metrics for the snapshot."""
-    total = df.count()
+    """Compute a single-row summary of quality metrics for the snapshot.
+
+    Uses count("*") inline so all metrics are computed in a single Spark action.
+    """
+    n = count("*")
     return df.agg(
         lit(snapshot_date).alias("snapshot_date"),
-        lit(total).alias("row_count"),
+        n.alias("row_count"),
         countDistinct("cve_id").alias("distinct_cve_count"),
-        (spark_sum(when(col("cvss_score").isNull(), 1).otherwise(0)) * 100.0 / total)
+        (spark_sum(when(col("cvss_score").isNull(), 1).otherwise(0)) * 100.0 / n)
             .alias("pct_null_cvss"),
-        (spark_sum(when(col("epss_score") == 0.0, 1).otherwise(0)) * 100.0 / total)
+        (spark_sum(when(col("epss_score") == 0.0, 1).otherwise(0)) * 100.0 / n)
             .alias("pct_null_epss"),
         (spark_sum(when(
             col("cwes").isNull() | (size(col("cwes")) == 0), 1
-        ).otherwise(0)) * 100.0 / total).alias("pct_null_cwes"),
+        ).otherwise(0)) * 100.0 / n).alias("pct_null_cwes"),
         (spark_sum(when(
             col("cpe_vendors").isNull() | (size(col("cpe_vendors")) == 0), 1
-        ).otherwise(0)) * 100.0 / total).alias("pct_null_cpe"),
-        (spark_sum(when(col("epss_score") > 0.7, 1).otherwise(0)) * 100.0 / total)
+        ).otherwise(0)) * 100.0 / n).alias("pct_null_cpe"),
+        (spark_sum(when(col("epss_score") > 0.7, 1).otherwise(0)) * 100.0 / n)
             .alias("pct_epss_gt_07"),
-        (spark_sum(when(col("epss_score") > 0.9, 1).otherwise(0)) * 100.0 / total)
+        (spark_sum(when(col("epss_score") > 0.9, 1).otherwise(0)) * 100.0 / n)
             .alias("pct_epss_gt_09"),
         avg("epss_score").alias("mean_epss"),
         percentile_approx("epss_score", 0.5).alias("median_epss"),
@@ -139,10 +142,14 @@ def save_metrics(
 def run_data_quality(spark: SparkSession, snapshot_date: str) -> None:
     """Orchestrate the full data quality job for one snapshot."""
     df = load_master(spark, snapshot_date)
-    summary_df = compute_summary_metrics(df, snapshot_date)
-    severity_df = compute_severity_distribution(df, snapshot_date)
-    kev_year_df = compute_kev_by_year(df, snapshot_date)
-    save_metrics(summary_df, severity_df, kev_year_df, snapshot_date)
+    df.cache()
+    try:
+        summary_df = compute_summary_metrics(df, snapshot_date)
+        severity_df = compute_severity_distribution(df, snapshot_date)
+        kev_year_df = compute_kev_by_year(df, snapshot_date)
+        save_metrics(summary_df, severity_df, kev_year_df, snapshot_date)
+    finally:
+        df.unpersist()
 
 
 def parse_args() -> argparse.Namespace:
