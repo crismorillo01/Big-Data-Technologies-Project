@@ -45,6 +45,7 @@ from src.config import (  # noqa: E402
     DEFAULT_NVD_YEARS,
     DEFAULT_SIMULATION_DAYS,
     configure_logging,
+    get_snapshot_date,
 )
 
 
@@ -73,9 +74,11 @@ def build_steps(
     daily_capacity: int,
     simulation_days: int,
     driver_memory: str,
+    snapshot_date: str,
 ) -> list[Step]:
     """Build the ordered list of pipeline steps."""
     common_driver = ("--driver-memory", driver_memory)
+    common_snapshot = ("--snapshot-date", snapshot_date)
     return [
         Step(
             name="ingest_nvd",
@@ -98,31 +101,31 @@ def build_steps(
         Step(
             name="join_master",
             script="src/processing/join_master.py",
-            args=common_driver,
+            args=common_driver + common_snapshot,
             owner="A",
         ),
         Step(
             name="data_quality",
             script="src/processing/data_quality.py",
-            args=common_driver,
+            args=common_driver + common_snapshot,
             owner="B",
         ),
         Step(
             name="priority_scoring",
             script="src/scoring/priority_scoring.py",
-            args=common_driver,
+            args=common_driver + common_snapshot,
             owner="B",
         ),
         Step(
             name="clustering",
             script="src/clustering/clustering.py",
-            args=common_driver,
+            args=common_driver + common_snapshot,
             owner="B",
         ),
         Step(
             name="cluster_aware_scoring",
             script="src/scoring/cluster_aware_scoring.py",
-            args=common_driver,
+            args=common_driver + common_snapshot,
             owner="B",
         ),
         Step(
@@ -155,13 +158,22 @@ def _find_spark_submit() -> str:
     name lookup, so we resolve the full path here.
     """
     venv_bin = Path(sys.executable).parent
-    for name in ("spark-submit.cmd", "spark-submit"):
+    candidate_names = (
+        ("spark-submit.cmd", "spark-submit")
+        if os.name == "nt"
+        else ("spark-submit", "spark-submit.cmd")
+    )
+
+    for name in candidate_names:
         candidate = venv_bin / name
         if candidate.exists():
             return str(candidate)
-    found = shutil.which("spark-submit.cmd") or shutil.which("spark-submit")
-    if found:
-        return found
+
+    for name in candidate_names:
+        found = shutil.which(name)
+        if found:
+            return found
+
     raise RuntimeError(
         "spark-submit not found. Activate the project venv or add PySpark's "
         "Scripts directory to PATH."
@@ -245,6 +257,11 @@ def parse_args() -> argparse.Namespace:
         default="3g",
         help="Spark driver memory passed to every step. Default: 3g.",
     )
+    parser.add_argument(
+        "--snapshot-date",
+        default=get_snapshot_date(),
+        help="Gold-layer snapshot date (YYYY-MM-DD). Default: today UTC.",
+    )
     return parser.parse_args()
 
 
@@ -258,12 +275,14 @@ def main() -> None:
         daily_capacity=args.daily_capacity,
         simulation_days=args.simulation_days,
         driver_memory=args.driver_memory,
+        snapshot_date=args.snapshot_date,
     )
 
     logger.info("Vulnerability intelligence pipeline starting")
     logger.info("  years=%s", args.years)
     logger.info("  daily_capacity=%d  simulation_days=%d", args.daily_capacity, args.simulation_days)
     logger.info("  driver_memory=%s", args.driver_memory)
+    logger.info("  snapshot_date=%s", args.snapshot_date)
 
     run_pipeline(steps)
 

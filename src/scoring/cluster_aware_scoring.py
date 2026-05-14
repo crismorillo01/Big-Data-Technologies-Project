@@ -45,10 +45,17 @@ from src.config import (
 _log = logging.getLogger(__name__)
 
 
-def load_clustered(spark: SparkSession) -> DataFrame:
-    """Load the clustered vulnerability dataset."""
-    _log.info("Loading clustered vulnerabilities from %s", GOLD_VULN_CLUSTERED_DIR)
-    return spark.read.parquet(str(GOLD_VULN_CLUSTERED_DIR))
+def load_clustered(spark: SparkSession, snapshot_date: str) -> DataFrame:
+    """Load clustered vulnerabilities for the requested snapshot date."""
+    _log.info(
+        "Loading clustered vulnerabilities from %s for snapshot_date=%s",
+        GOLD_VULN_CLUSTERED_DIR,
+        snapshot_date,
+    )
+    return (
+        spark.read.parquet(str(GOLD_VULN_CLUSTERED_DIR))
+        .filter(col("snapshot_date") == lit(snapshot_date).cast(DateType()))
+    )
 
 
 def compute_cluster_stats(df: DataFrame) -> DataFrame:
@@ -130,7 +137,7 @@ def run_cluster_aware_scoring(
     beta: float = DEFAULT_CLUSTER_EPSS_BETA,
 ) -> DataFrame:
     """Orchestrate the full cluster-aware scoring job."""
-    df = load_clustered(spark)
+    df = load_clustered(spark, snapshot_date)
     df = build_final_scored_dataset(df, alpha, beta)
     save_final_scores(df, snapshot_date)
     return df

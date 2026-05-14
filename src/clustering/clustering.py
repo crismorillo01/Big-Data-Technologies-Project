@@ -46,14 +46,13 @@ from pyspark.sql.functions import (
     explode,
     lit,
     lower,
-    max as spark_max,
     regexp_replace,
     row_number,
     substring,
     sum as spark_sum,
     when,
 )
-from pyspark.sql.types import ArrayType, StringType
+from pyspark.sql.types import ArrayType, DateType, StringType
 from pyspark.sql.window import Window
 
 # NOTE: array() requires an active SparkContext — do NOT call it at module level.
@@ -65,6 +64,7 @@ from src.config import (
     GOLD_VULN_SCORES_DIR,
     configure_logging,
     create_spark_session,
+    get_snapshot_date,
 )
 
 _log = logging.getLogger(__name__)
@@ -87,18 +87,15 @@ _DOMAIN_STOPWORDS = [
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_scored_vulnerabilities(spark: SparkSession) -> DataFrame:
-    """Load the latest snapshot of base-scored vulnerabilities from the gold layer.
-
-    Filters to the most recent snapshot_date so that re-running the pipeline on
-    different days does not cause the same CVEs to appear multiple times in the
-    clustering input (one copy per historical partition).
-    """
-    _log.info("Loading scored vulnerabilities from %s", GOLD_VULN_SCORES_DIR)
+def load_scored_vulnerabilities(spark: SparkSession, snapshot_date: str) -> DataFrame:
+    """Load base-scored vulnerabilities for the requested snapshot date."""
+    _log.info(
+        "Loading scored vulnerabilities from %s for snapshot_date=%s",
+        GOLD_VULN_SCORES_DIR,
+        snapshot_date,
+    )
     all_scores = spark.read.parquet(str(GOLD_VULN_SCORES_DIR))
-    latest = all_scores.agg(spark_max("snapshot_date").alias("latest")).collect()[0]["latest"]
-    _log.info("Using snapshot_date=%s", latest)
-    return all_scores.filter(col("snapshot_date") == lit(latest))
+    return all_scores.filter(col("snapshot_date") == lit(snapshot_date).cast(DateType()))
 
 
 # ---------------------------------------------------------------------------
@@ -385,21 +382,51 @@ def save_outputs(
     predictions_df: DataFrame,
     topics_df: DataFrame,
     metrics: List[Tuple[int, float, float, float]],
+    snapshot_date: str,
 ) -> None:
     """Write clustered dataset, cluster topics, and K-selection metrics."""
     cluster_ids = predictions_df.select("cve_id", "cluster_id")
-    clustered_df = full_df.join(cluster_ids, on="cve_id", how="left")
+    clustered_df = (
+        full_df
+        .join(cluster_ids, on="cve_id", how="left")
+        .withColumn("snapshot_date", lit(snapshot_date).cast(DateType()))
+    )
 
-    _log.info("Writing clustered vulnerabilities to %s", GOLD_VULN_CLUSTERED_DIR)
-    clustered_df.write.mode("overwrite").parquet(str(GOLD_VULN_CLUSTERED_DIR))
+    _log.info(
+        "Writing clustered vulnerabilities to %s (snapshot_date=%s)",
+        GOLD_VULN_CLUSTERED_DIR,
+        snapshot_date,
+    )
+    (
+        clustered_df.write
+        .mode("overwrite")
+        .partitionBy("snapshot_date")
+        .parquet(str(GOLD_VULN_CLUSTERED_DIR))
+    )
 
-    _log.info("Writing cluster topics to %s", GOLD_CLUSTER_TOPICS_DIR)
-    topics_df.write.mode("overwrite").parquet(str(GOLD_CLUSTER_TOPICS_DIR))
+    _log.info("Writing cluster topics to %s (snapshot_date=%s)", GOLD_CLUSTER_TOPICS_DIR, snapshot_date)
+    (
+        topics_df
+        .withColumn("snapshot_date", lit(snapshot_date).cast(DateType()))
+        .write
+        .mode("overwrite")
+        .partitionBy("snapshot_date")
+        .parquet(str(GOLD_CLUSTER_TOPICS_DIR))
+    )
 
-    _log.info("Writing clustering metrics to %s", GOLD_CLUSTERING_METRICS_DIR)
-    spark.createDataFrame(metrics, ["k", "silhouette", "cost", "davies_bouldin"]).write.mode(
-        "overwrite"
-    ).parquet(str(GOLD_CLUSTERING_METRICS_DIR))
+    _log.info(
+        "Writing clustering metrics to %s (snapshot_date=%s)",
+        GOLD_CLUSTERING_METRICS_DIR,
+        snapshot_date,
+    )
+    (
+        spark.createDataFrame(metrics, ["k", "silhouette", "cost", "davies_bouldin"])
+        .withColumn("snapshot_date", lit(snapshot_date).cast(DateType()))
+        .write
+        .mode("overwrite")
+        .partitionBy("snapshot_date")
+        .parquet(str(GOLD_CLUSTERING_METRICS_DIR))
+    )
 
     _log.info("Cluster sizes:")
     clustered_df.groupBy("cluster_id").count().orderBy("cluster_id").show()
@@ -412,6 +439,7 @@ def save_outputs(
 def run_clustering(
     spark: SparkSession,
     k_values: List[int],
+    snapshot_date: str,
     description_length: int = 1000,
     vocab_size: int = 500,
     min_df: int = 20,
@@ -419,7 +447,7 @@ def run_clustering(
     pca_k: int = 100,
 ) -> None:
     """Run the full clustering pipeline end-to-end."""
-    full_df = load_scored_vulnerabilities(spark)
+    full_df = load_scored_vulnerabilities(spark, snapshot_date)
 
     df = prepare_text(full_df, description_length)
     df, cv_model = build_tfidf(df, vocab_size, min_df)
@@ -438,7 +466,7 @@ def run_clustering(
     predictions_df, model = train_final_model(df, best_k)
     topics_df = build_cluster_topics(spark, predictions_df, model, cv_model.vocabulary, pca_model)
 
-    save_outputs(spark, full_df, predictions_df, topics_df, metrics)
+    save_outputs(spark, full_df, predictions_df, topics_df, metrics, snapshot_date)
     df.unpersist()
     _log.info("Clustering job complete.")
 
@@ -454,6 +482,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vocab-size", type=int, default=500)
     parser.add_argument("--min-df",     type=int, default=20)
     parser.add_argument("--pca-k",      type=int, default=100)
+    parser.add_argument("--snapshot-date", default=get_snapshot_date())
     parser.add_argument("--no-pca",     action="store_true",
                         help="Skip PCA and pass assembled features directly to KMeans.")
     parser.add_argument("--driver-memory", default="3g",
@@ -469,6 +498,7 @@ def main() -> None:
         run_clustering(
             spark,
             k_values=args.k_values,
+            snapshot_date=args.snapshot_date,
             description_length=args.description_length,
             vocab_size=args.vocab_size,
             min_df=args.min_df,

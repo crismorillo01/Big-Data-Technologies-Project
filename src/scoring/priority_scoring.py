@@ -47,10 +47,17 @@ from src.config import (
 _log = logging.getLogger(__name__)
 
 
-def load_master_dataset(spark: SparkSession) -> DataFrame:
-    """Load the full master vulnerability dataset."""
-    _log.info("Loading master dataset from %s", GOLD_MASTER_DIR)
-    return spark.read.parquet(str(GOLD_MASTER_DIR))
+def load_master_dataset(spark: SparkSession, snapshot_date: str) -> DataFrame:
+    """Load master vulnerabilities for the requested snapshot date."""
+    _log.info(
+        "Loading master dataset from %s for snapshot_date=%s",
+        GOLD_MASTER_DIR,
+        snapshot_date,
+    )
+    return (
+        spark.read.parquet(str(GOLD_MASTER_DIR))
+        .filter(col("snapshot_date") == lit(snapshot_date).cast(DateType()))
+    )
 
 
 def prepare_scoring_columns(df: DataFrame) -> DataFrame:
@@ -163,7 +170,7 @@ def run_priority_scoring(
     recency_weight: float = DEFAULT_RECENCY_WEIGHT,
 ) -> DataFrame:
     """Run the full priority scoring job and return the scored DataFrame."""
-    master_df = load_master_dataset(spark)
+    master_df = load_master_dataset(spark, snapshot_date)
     scored_df = build_scored_dataset(master_df, cvss_weight, epss_weight, kev_weight, recency_weight)
     save_scored_dataset(scored_df, snapshot_date)
     return scored_df
