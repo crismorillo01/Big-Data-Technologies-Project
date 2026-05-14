@@ -46,6 +46,7 @@ from pyspark.sql.functions import (
     explode,
     lit,
     lower,
+    max as spark_max,
     regexp_replace,
     row_number,
     substring,
@@ -87,9 +88,17 @@ _DOMAIN_STOPWORDS = [
 # ---------------------------------------------------------------------------
 
 def load_scored_vulnerabilities(spark: SparkSession) -> DataFrame:
-    """Load base-scored vulnerabilities from the gold layer."""
+    """Load the latest snapshot of base-scored vulnerabilities from the gold layer.
+
+    Filters to the most recent snapshot_date so that re-running the pipeline on
+    different days does not cause the same CVEs to appear multiple times in the
+    clustering input (one copy per historical partition).
+    """
     _log.info("Loading scored vulnerabilities from %s", GOLD_VULN_SCORES_DIR)
-    return spark.read.parquet(str(GOLD_VULN_SCORES_DIR))
+    all_scores = spark.read.parquet(str(GOLD_VULN_SCORES_DIR))
+    latest = all_scores.agg(spark_max("snapshot_date").alias("latest")).collect()[0]["latest"]
+    _log.info("Using snapshot_date=%s", latest)
+    return all_scores.filter(col("snapshot_date") == lit(latest))
 
 
 # ---------------------------------------------------------------------------
