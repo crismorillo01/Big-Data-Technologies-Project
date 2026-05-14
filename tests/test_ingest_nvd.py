@@ -1,4 +1,4 @@
-"""Tests for src/ingestion/ingest_nvd.py — the heart of the ingestion logic.
+﻿"""Tests for src/ingestion/ingest_nvd.py — the heart of the ingestion logic.
 
 The transform fans out a deeply-nested NVD 2.0 JSON into a flat silver
 schema. We test it end-to-end by writing a tiny JSON fixture matching
@@ -108,7 +108,7 @@ def nvd_silver(spark, tmp_path: Path):
     json_path.write_text(json.dumps(_nvd_fixture()))
 
     df_raw = load_nvd_year(spark, json_path)
-    df_silver = transform_nvd_year(df_raw)
+    df_silver = transform_nvd_year(df_raw, year=2024)
     rows = df_silver.collect()
     return {r["cve_id"]: r.asDict() for r in rows}
 

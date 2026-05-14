@@ -1,4 +1,4 @@
-"""NVD ingestion job — year-by-year processing into the silver layer.
+﻿"""NVD ingestion job — year-by-year processing into the silver layer.
 
 This job downloads the NVD 2.0 yearly JSON feeds, extracts the fields
 the rest of the pipeline needs, and writes one Parquet partition per
@@ -153,7 +153,7 @@ _CPE_FLAT_EXPR = (
 )
 
 
-def transform_nvd_year(df_raw: DataFrame) -> DataFrame:
+def transform_nvd_year(df_raw: DataFrame, year: int) -> DataFrame:
     """Project the raw NVD year DataFrame onto the silver schema."""
     exploded = (
         df_raw
@@ -250,7 +250,7 @@ def run_nvd_ingestion(
 
         logger.info("[year %d] reading and transforming", year)
         df_raw = load_nvd_year(spark, json_path)
-        df_silver = transform_nvd_year(df_raw)
+        df_silver = transform_nvd_year(df_raw, year)
 
         logger.info("[year %d] writing silver partition", year)
         n_rows = write_year_partition(df_silver, output_dir, year)

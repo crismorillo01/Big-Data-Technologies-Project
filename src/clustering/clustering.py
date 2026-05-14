@@ -201,7 +201,7 @@ def assemble_features(
     if use_pca:
         _log.info("Applying PCA with k=%d", pca_k)
         pca_model = PCA(k=pca_k, inputCol="assembled_features", outputCol="features").fit(df)
-        df = pca_model.transform(df)
+        df = pca_model.transform(df).drop("assembled_features")
         _log.info("PCA total explained variance: %.3f",
                   pca_model.explainedVariance.toArray().sum())
         return df, pca_model
@@ -417,6 +417,10 @@ def run_clustering(
     df = build_categorical_features(df)
     df = build_numeric_features(df)
     df, pca_model = assemble_features(df, use_pca=use_pca, pca_k=pca_k)
+    # Keep only columns needed downstream; all NLP intermediates (description,
+    # clean_text, words, tfidf vectors, etc.) are dropped here to minimise the
+    # cache footprint during the KMeans k-selection loop.
+    df = df.select("cve_id", "features", "is_kev", "cwes", "cpe_vendors")
     df.cache()
 
     metrics = evaluate_k_values(df, k_values)
