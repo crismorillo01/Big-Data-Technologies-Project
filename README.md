@@ -35,8 +35,7 @@ answers four questions, mapped to the four pillars of the course brief:
 ```
 ┌────────────────────────────────────────────────────────────────────┐
 │ Orchestration                                                       │
-│   src/pipeline/daily_pipeline.py    (always works)                  │
-│   dags/vulnerability_intel_daily.py (optional, Airflow)             │
+│   src/pipeline/daily_pipeline.py    (manual run or cron schedule)   │
 └────────────────────────────────────────────────────────────────────┘
                   │
        ┌──────────┼──────────┐
@@ -112,7 +111,7 @@ All three are public, free and stable.
 
 ## Big Data justification
 
-This is a real Big Data system, not a cron-and-pandas script that says
+This is a real Big Data system, not a small pandas script that says
 "big" on the label.
 
 - **Variety** — three sources with very different formats and semantics:
@@ -126,8 +125,8 @@ This is a real Big Data system, not a cron-and-pandas script that says
 - **Velocity** — the source with the fastest cadence is the NVD
   `modified` feed at every 2 hours; EPSS is daily; KEV is event-driven
   but rare. We materialize the velocity dimension as a daily batch
-  pipeline; an optional Airflow DAG turns the implicit DAG between jobs
-  into an explicit, observable, retry-aware schedule.
+  pipeline; the local cron schedule launches the same deterministic
+  orchestrator every day.
 
 ### Why **not** Kafka
 
@@ -158,15 +157,14 @@ multi-GB dependency tree and configuration burden disproportionate to
 single-node academic work. The trade-off is documented; migration would
 be a one-week task on top of the current code.
 
-### Why optional Airflow
+### Why cron for orchestration
 
-The pipeline has a real DAG: NVD/KEV/EPSS run in parallel, then join,
-then scoring/clustering, then simulation. `daily_pipeline.py` runs that
-DAG sequentially; Airflow would materialize it as a graph with
-parallelism, retries, sensors, and a web UI. We treat Airflow as the
-last optional session because its scheduler + webserver + triggerer
-take ~1 GB of RAM, on the edge of what fits next to Spark on an 8 GB
-laptop. A 30-minute RAM benchmark gates whether we ship it.
+The pipeline has a real dependency order: ingest the public sources,
+join the master table, score and cluster vulnerabilities, simulate
+capacity, and produce remediation actions. `daily_pipeline.py` keeps
+that order explicit in one lightweight command, and cron is enough to
+run it once per day on a laptop without adding another always-on service
+next to Spark.
 
 ---
 
@@ -178,9 +176,6 @@ laptop. A 30-minute RAM benchmark gates whether we ship it.
 ├── IMPLEMENTATION_PLAN.md          ← team contract / file-by-file spec
 ├── requirements.txt
 ├── .gitignore
-├── docker-compose.yml              ← optional, Airflow only
-├── dags/
-│   └── vulnerability_intel_daily.py    ← optional, Airflow DAG
 ├── src/
 │   ├── config.py                   ← every path + Spark session factory
 │   ├── ingestion/
@@ -271,11 +266,29 @@ streamlit run app/streamlit_app.py
 Opens at `http://localhost:8501` with five pages: Overview, Vulnerability
 Explorer, Cluster View, Capacity Simulator, Remediation Plan.
 
-### Optional: Airflow
+### Daily local scheduling with cron
 
-Documented in `dags/vulnerability_intel_daily.py`. Only enable if a
-30-minute RAM check on your laptop survives Airflow standalone +
-Spark + the OS without thrashing.
+On macOS/Linux, cron can run the same pipeline every day. Create the
+logs directory first:
+
+```bash
+mkdir -p logs
+```
+
+Then edit the crontab:
+
+```bash
+crontab -e
+```
+
+Example daily run at 03:00. Replace the placeholder paths with the
+absolute paths on the machine that will run the job:
+
+```cron
+0 3 * * * export JAVA_HOME=/absolute/path/to/java && export PATH=/absolute/path/to/java/bin:/absolute/path/to/Big-Data-Technologies-Project/.venv/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin && cd /absolute/path/to/Big-Data-Technologies-Project && ./.venv/bin/python src/pipeline/daily_pipeline.py >> logs/daily_pipeline.log 2>&1
+```
+
+Cron only runs while the computer is awake.
 
 ---
 
@@ -323,7 +336,7 @@ works, not just runs.
 
 | Person | Slice | Files owned |
 |---|---|---|
-| **A** | Infrastructure, ingestion, master | `src/config.py`, `src/utils/http.py`, `src/ingestion/*`, `src/processing/join_master.py`, `src/pipeline/daily_pipeline.py`, `requirements.txt`, `.gitignore`, `README.md`, optional Airflow |
+| **A** | Infrastructure, ingestion, master | `src/config.py`, `src/utils/http.py`, `src/ingestion/*`, `src/processing/join_master.py`, `src/pipeline/daily_pipeline.py`, `requirements.txt`, `.gitignore`, `README.md` |
 | **B** | Data quality, scoring, clustering | `src/processing/data_quality.py`, `src/scoring/priority_scoring.py`, `src/scoring/cluster_aware_scoring.py`, `src/clustering/clustering.py` |
 | **C** | Simulation, remediation, app | `src/optimization/capacity_simulation.py`, `src/optimization/remediation_actions.py`, `src/utils/duckdb_helpers.py`, `app/streamlit_app.py` |
 

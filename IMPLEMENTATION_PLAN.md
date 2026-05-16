@@ -31,7 +31,7 @@ The deliverable must be a Big Data system: a real medallion pipeline on Spark, d
 
 - **Variety**: three sources with different formats (multiline nested JSON, flat CSV, gzipped CSV) and different semantics (catalog, ranking, ground truth).
 - **Volume**: 12 years × growing rate \~ 250-300 K CVEs; full join in the gold layer is in the millions of rows once history of EPSS is kept.
-- **Velocity**: NVD `modified` feed updates every 2 h, EPSS daily, KEV ad-hoc. The system runs as a daily batch pipeline; an Airflow DAG materializes the orchestration.
+- **Velocity**: NVD `modified` feed updates every 2 h, EPSS daily, KEV ad-hoc. The system runs as a daily batch pipeline launched manually or by cron.
 
 ### Why not Kafka
 
@@ -41,9 +41,9 @@ All three sources publish at human-readable batch cadences (≥ 2 h). Volumes pe
 
 The Streamlit app and the analysis notebooks need SQL access over the gold-layer Parquet without paying for an ETL into a server-based database. DuckDB queries Parquet files directly (with predicate pushdown over our partitions), is embedded (no service to run), and uses \~80 MB only when a query is executing. We get a clean compute-vs-serving separation without duplicating data.
 
-### Why Airflow (optional, gated by hardware)
+### Why cron for orchestration
 
-The pipeline has a real DAG (NVD/KEV/EPSS in parallel, then join, then scoring/clustering, then simulation). Airflow makes that DAG explicit, adds retries, scheduling, and an observable web UI. We add it as the last session and gate it behind a 30-min RAM measurement on the developer's laptop. Fallback if it does not fit: keep the existing `src/pipeline/daily_pipeline.py` as a cron-triggered runner.
+The pipeline has a real dependency order (NVD/KEV/EPSS ingestion, then join, then scoring/clustering, then simulation). For this single-node academic setup, `src/pipeline/daily_pipeline.py` keeps that order explicit and cron can launch it daily without adding an always-on scheduler next to Spark.
 
 ### Constraints
 
@@ -59,7 +59,7 @@ The pipeline has a real DAG (NVD/KEV/EPSS in parallel, then join, then scoring/c
 ```         
 ┌──────────────────────────────────────────────────────────────────────┐
 │                         Orchestration                                 │
-│  Airflow DAG (optional)  /  src/pipeline/daily_pipeline.py (fallback)│
+│  src/pipeline/daily_pipeline.py (manual run or cron schedule)         │
 └──────────────────────────────────────────────────────────────────────┘
                 │
                 ▼
@@ -191,9 +191,6 @@ Big-Data-Technologies-Project/
 ├── requirements.txt
 ├── .gitignore
 ├── IMPLEMENTATION_PLAN.md              ← this file
-├── docker-compose.yml                  ← optional (Airflow)
-├── dags/
-│   └── vulnerability_intel_daily.py    ← optional (Airflow DAG)
 ├── src/
 │   ├── __init__.py
 │   ├── config.py                        ← central paths + Spark session
@@ -411,21 +408,6 @@ Each file below has: **purpose**, **change type** (NEW / MODIFY / DELETE), **own
 
 ------------------------------------------------------------------------
 
-#### `dags/vulnerability_intel_daily.py` — NEW (optional) — Owner: A
-
-**Purpose.** Airflow DAG. Only added if the laptop survives the Session 0 RAM measurement.
-
-**Required content.**
-
-- Schedule `0 3 * * *`, `catchup=False`, `max_active_tasks=2` (RAM safety).
-- Default args: `retries=2`, `retry_delay=5min`.
-- `BashOperator` per pipeline step calling `spark-submit` on the corresponding `src/...` script.
-- Dependencies: `[ingest_nvd, ingest_kev, ingest_epss] >> join_master >> [data_quality, priority_scoring] >> clustering >> cluster_aware_scoring >> capacity_simulation >> remediation_actions`.
-
-**Acceptance.** DAG passes `airflow dags reserialize` without errors and a manual trigger executes end-to-end.
-
-------------------------------------------------------------------------
-
 #### `README.md` — NEW (currently 1 line) — Owner: A
 
 **Purpose.** First thing the evaluator sees.
@@ -436,9 +418,9 @@ Each file below has: **purpose**, **change type** (NEW / MODIFY / DELETE), **own
 2.  Architecture diagram (ASCII or PNG generated from Mermaid).
 3.  Data sources table with frequencies (copy from Section 1 of this plan).
 4.  Big Data justification (variety, volume, velocity).
-5.  Trade-offs and choices: why Spark, why Parquet (not Delta), why DuckDB, why not Kafka, why optional Airflow.
+5.  Trade-offs and choices: why Spark, why Parquet (not Delta), why DuckDB, why not Kafka, why cron.
 6.  Repository layout.
-7.  How to run: requirements, environment setup, single-command pipeline run, Streamlit launch, optional Airflow.
+7.  How to run: requirements, environment setup, single-command pipeline run, Streamlit launch, cron scheduling.
 8.  Measurable goals (set targets for KEV coverage, pipeline runtime, data-quality thresholds, etc.).
 9.  Limitations and future work.
 10. Team and division of work.
@@ -463,15 +445,13 @@ streamlit==1.36.0
 plotly==5.22.0
 scikit-learn==1.5.0
 pytest==8.2.2
-# optional, only if Airflow session goes ahead
-apache-airflow==2.9.2
 ```
 
 ------------------------------------------------------------------------
 
 #### `.gitignore` — NEW — Owner: A
 
-Must exclude `data/`, `__pycache__/`, `.ipynb_checkpoints/`, `.DS_Store`, `.vscode/`, `*.parquet`, `*.crc`, `airflow.db`, `logs/`, `venv/`, `.env`.
+Must exclude `data/`, `__pycache__/`, `.ipynb_checkpoints/`, `.DS_Store`, `.vscode/`, `*.parquet`, `*.crc`, `logs/`, `venv/`, `.env`.
 
 ------------------------------------------------------------------------
 
@@ -655,7 +635,7 @@ Also delete:
 
 This is a binding split. Each owner is responsible for the files in their slice **and** the tests for those files.
 
-### Person A — Infrastructure + Ingestion + Master (\~12 h core, \~17 h with Airflow) — **lead / blocking dependency**
+### Person A — Infrastructure + Ingestion + Master (\~12 h core) — **lead / blocking dependency**
 
 Files this person owns (must be merged first; B and C cannot start their files until A's `src/config.py` and `src/utils/http.py` are on `main`):
 
@@ -671,7 +651,6 @@ Files this person owns (must be merged first; B and C cannot start their files u
 10. `src/processing/join_master.py` (MEDIUM: keep CPE/vendor/product, partitioning, snapshot_date).
 11. `src/pipeline/daily_pipeline.py` (MINOR update: new steps, use config).
 12. Tests for all files above.
-13. Optional / Session 8: `dags/vulnerability_intel_daily.py` and `docker-compose.yml`.
 
 Coordinates with: B on the master schema, C on the gold-layer paths.
 

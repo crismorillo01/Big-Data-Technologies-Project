@@ -2,8 +2,8 @@
 
 This script chains every Spark job into one deterministic, end-to-end run.
 It is the simplest possible orchestrator — a sequence of ``spark-submit``
-subprocesses — kept here as the always-working fallback to the optional
-Airflow DAG.
+subprocesses — and is the entry point for manual runs or the daily cron
+schedule.
 
 Step order
 ----------

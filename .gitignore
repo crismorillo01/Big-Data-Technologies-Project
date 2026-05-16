@@ -55,15 +55,6 @@ derby.log
 *.log
 logs/
 
-# ---- Airflow (only relevant if Session 8 is enabled) -----------------------
-airflow.db
-airflow.cfg
-airflow-webserver.pid
-webserver_config.py
-standalone_admin_password.txt
-dags/__pycache__/
-plugins/__pycache__/
-
 # ---- Project-specific scratch ----------------------------------------------
 scratch/
 tmp/

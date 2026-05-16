@@ -23,8 +23,3 @@ plotly==5.22.0               # used for cluster scatter and simulation timelines
 
 # ---- Testing ---------------------------------------------------------------
 pytest==8.2.2
-
-# ---- Orchestration (OPTIONAL) ---------------------------------------------
-# Only install if Session 8 (Airflow) is in scope. Comment out otherwise to
-# avoid pulling Airflow's heavy dependency tree.
-# apache-airflow==2.9.2
