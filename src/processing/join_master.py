@@ -1,4 +1,4 @@
-"""Master vulnerability dataset — joins NVD + KEV + (latest) EPSS into gold.
+"""Master vulnerability dataset — joins NVD + KEV + EPSS into gold.
 
 This job is the boundary between ingestion and analytics. It pulls the
 three silver datasets, normalizes them around ``cve_id``, and produces a
@@ -45,7 +45,7 @@ Active exploitation (CISA KEV):
 - ``known_ransomware_campaign_use`` : string (raw "Known"/"Unknown"/etc.)
 - ``is_ransomware``         : boolean
 
-Probability of exploitation (EPSS, latest snapshot):
+Probability of exploitation (EPSS, snapshot-aligned):
 - ``epss_score``            : double (0 if not in EPSS)
 - ``epss_percentile``       : double (0 if not in EPSS)
 - ``epss_score_date``       : date (which EPSS snapshot was used; null if no EPSS)
@@ -108,25 +108,36 @@ def load_kev(spark: SparkSession, silver_kev_dir: Path) -> DataFrame:
     return spark.read.parquet(str(silver_kev_dir))
 
 
-def load_latest_epss(spark: SparkSession, silver_epss_dir: Path) -> DataFrame:
-    """Read the most recent EPSS snapshot partition.
+def load_epss_for_snapshot(
+    spark: SparkSession,
+    silver_epss_dir: Path,
+    snapshot_date: str,
+) -> DataFrame:
+    """Read the latest EPSS partition available at or before ``snapshot_date``.
 
-    We want one EPSS row per CVE in the master, so picking the latest
-    ``score_date`` partition is the correct join input. The historical
-    snapshots remain in silver and are consumed by other jobs (data
-    quality and exploitability-trend analysis).
+    The master snapshot must not use exploitability signals from the
+    future. For example, a master run stamped ``2026-05-14`` may use EPSS
+    ``2026-05-14`` or an earlier available partition, but never
+    ``2026-05-16``.
     """
     logger.info("Loading EPSS silver from %s", silver_epss_dir)
     epss_all = spark.read.parquet(str(silver_epss_dir))
-    latest_row = epss_all.agg(spark_max("score_date").alias("latest")).collect()[0]
+    epss_as_of_snapshot = epss_all.where(
+        col("score_date") <= lit(snapshot_date).cast("date")
+    )
+    latest_row = epss_as_of_snapshot.agg(spark_max("score_date").alias("latest")).collect()[0]
     latest_date = latest_row["latest"]
 
     if latest_date is None:
-        logger.warning("EPSS silver is empty; the master will have null EPSS columns.")
-        return epss_all  # empty, but with the right schema
+        logger.warning(
+            "No EPSS partition found at or before snapshot_date=%s; "
+            "the master will have null EPSS columns.",
+            snapshot_date,
+        )
+        return epss_all.limit(0)  # empty, but with the right schema
 
-    logger.info("Using EPSS partition score_date=%s", latest_date)
-    return epss_all.where(col("score_date") == lit(latest_date))
+    logger.info("Using EPSS partition score_date=%s for snapshot_date=%s", latest_date, snapshot_date)
+    return epss_as_of_snapshot.where(col("score_date") == lit(latest_date))
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +192,7 @@ def build_master_dataset(
     epss_df: DataFrame,
     snapshot_date_str: str,
 ) -> DataFrame:
-    """Left-join NVD with KEV and the latest EPSS snapshot."""
+    """Left-join NVD with KEV and the selected EPSS snapshot."""
     kev_prepared = prepare_kev(kev_df)
     epss_prepared = prepare_epss(epss_df)
 
@@ -254,7 +265,7 @@ def run_master_build(
 
     nvd_df = load_nvd(spark, silver_nvd_dir)
     kev_df = load_kev(spark, silver_kev_dir)
-    epss_df = load_latest_epss(spark, silver_epss_dir)
+    epss_df = load_epss_for_snapshot(spark, silver_epss_dir, snapshot)
 
     master = build_master_dataset(nvd_df, kev_df, epss_df, snapshot)
     return save_master(master, output_dir)
@@ -263,7 +274,7 @@ def run_master_build(
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
     parser = argparse.ArgumentParser(
-        description="Build the master vulnerability dataset (NVD ⟕ KEV ⟕ latest EPSS)."
+        description="Build the master vulnerability dataset (NVD ⟕ KEV ⟕ snapshot-aligned EPSS)."
     )
     parser.add_argument("--silver-nvd", type=Path, default=SILVER_NVD_DIR)
     parser.add_argument("--silver-kev", type=Path, default=SILVER_KEV_DIR)

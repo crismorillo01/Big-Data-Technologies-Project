@@ -13,6 +13,7 @@ import datetime as dt
 
 from src.processing.join_master import (
     build_master_dataset,
+    load_epss_for_snapshot,
     prepare_epss,
     prepare_kev,
 )
@@ -88,6 +89,23 @@ def test_prepare_epss_keeps_epss_score_date(spark):
     out = prepare_epss(_silver_epss_df(spark))
     assert "epss_score_date" in out.columns
     assert "score_date" not in out.columns
+
+
+def test_load_epss_for_snapshot_never_uses_future_scores(spark, tmp_path):
+    rows = [
+        ("CVE-2024-0001", 0.10, 0.20, dt.date(2026, 5, 10)),
+        ("CVE-2024-0001", 0.30, 0.40, dt.date(2026, 5, 14)),
+        ("CVE-2024-0001", 0.90, 0.99, dt.date(2026, 5, 16)),
+    ]
+    cols = ["cve_id", "epss_score", "epss_percentile", "score_date"]
+    epss_dir = tmp_path / "epss"
+    spark.createDataFrame(rows, cols).write.partitionBy("score_date").parquet(str(epss_dir))
+
+    out = load_epss_for_snapshot(spark, epss_dir, "2026-05-14").collect()
+
+    assert len(out) == 1
+    assert out[0]["score_date"] == dt.date(2026, 5, 14)
+    assert out[0]["epss_score"] == 0.30
 
 
 # ---------------------------------------------------------------------------
