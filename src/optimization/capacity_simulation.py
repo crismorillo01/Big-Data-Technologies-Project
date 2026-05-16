@@ -300,7 +300,12 @@ def run_capacity_simulation(
             name, metrics["kev_coverage"], metrics["epss_expected_mitigated"],
         )
         rec_out = GOLD_REMEDIATION_RECOMMENDATIONS_DIR / name
-        write_parquet(selected, rec_out)
+        write_parquet(
+            selected,
+            rec_out,
+            partition_col="snapshot_date",
+            snapshot_date=actual_date,
+        )
 
     write_parquet(
         pd.DataFrame(results),
@@ -332,7 +337,12 @@ def run_capacity_simulation(
             .reset_index()
         )
 
-    write_parquet(cluster_summary, GOLD_CLUSTER_RISK_SUMMARY_DIR)
+    write_parquet(
+        cluster_summary,
+        GOLD_CLUSTER_RISK_SUMMARY_DIR,
+        partition_col="snapshot_date",
+        snapshot_date=actual_date,
+    )
     _log.info("Cluster risk summary written with %d clusters.", len(cluster_summary))
 
     # Multi-day simulation
@@ -354,6 +364,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--daily-capacity", type=int, default=DEFAULT_DAILY_CAPACITY)
     parser.add_argument("--simulation-days", type=int, default=DEFAULT_SIMULATION_DAYS)
     parser.add_argument("--arrival-rate", type=int, default=DEFAULT_ARRIVAL_RATE)
+    parser.add_argument(
+        "--driver-memory",
+        default="3g",
+        help="Accepted for pipeline CLI consistency; pandas implementation does not use it.",
+    )
     return parser.parse_args()
 
 

@@ -63,7 +63,9 @@ def _overview_stats(snapshot_date):
     ] if base.exists() else []
 
     actual_date = str(snapshot_date)[:10] if snapshot_date else None
-    if actual_date not in folders:
+    if actual_date and actual_date not in folders:
+        return pd.DataFrame()
+    if not actual_date:
         actual_date = sorted(folders, reverse=True)[0] if folders else None
     if not actual_date:
         return pd.DataFrame()
@@ -92,9 +94,11 @@ def _top_vulns(n, min_priority, only_kev, vendor, snapshot_date):
         if p.is_dir() and p.name.startswith("snapshot_date=")
     ] if base.exists() else []
 
-    actual_date = snapshot_date if snapshot_date in folders else (
-        sorted(folders, reverse=True)[0] if folders else None
-    )
+    actual_date = snapshot_date if snapshot_date in folders else None
+    if snapshot_date and snapshot_date not in folders:
+        return pd.DataFrame()
+    if not actual_date:
+        actual_date = sorted(folders, reverse=True)[0] if folders else None
     if not actual_date:
         return pd.DataFrame()
 
@@ -118,20 +122,20 @@ def _top_vulns(n, min_priority, only_kev, vendor, snapshot_date):
     return df.nlargest(n, "priority_score_final") if "priority_score_final" in df.columns else df.head(n)
 
 @st.cache_data(ttl=300)
-def _cluster_overview():
-    return cluster_overview()
+def _cluster_overview(snapshot_date):
+    return cluster_overview(snapshot_date or None)
 
 @st.cache_data(ttl=300)
-def _strategy_comparison():
-    return strategy_comparison()
+def _strategy_comparison(snapshot_date):
+    return strategy_comparison(snapshot_date or None)
 
 @st.cache_data(ttl=300)
 def _remediation_actions(top_n, snapshot_date):
     return remediation_actions(top_n, snapshot_date or None)
 
 @st.cache_data(ttl=300)
-def _data_quality():
-    return data_quality_latest()
+def _data_quality(snapshot_date):
+    return data_quality_latest(snapshot_date or None)
 
 @st.cache_data(ttl=300)
 def _simulation_timeseries(snapshot_date):
@@ -177,8 +181,7 @@ elif date_mode == "Pick any date":
     )
     snapshot_date = str(picked)
     if snapshot_date not in snapshots:
-        st.sidebar.warning(f"No pipeline data for {snapshot_date}. Showing latest instead.")
-        snapshot_date = snapshots[0] if snapshots else None
+        st.sidebar.warning(f"No pipeline data for {snapshot_date}.")
 
 st.sidebar.markdown("---")
 st.sidebar.caption("Data: NVD · CISA KEV · EPSS")
@@ -200,7 +203,7 @@ def _no_data(df: pd.DataFrame, message: str = "No data available for this snapsh
 if page == "Overview":
     st.title("Overview")
 
-    dq = _data_quality()
+    dq = _data_quality(snapshot_date)
     scores = _overview_stats(snapshot_date)
 
     # ---- KPI row -----------------------------------------------------------
@@ -378,21 +381,9 @@ elif page == "Vulnerability Explorer":
 elif page == "Cluster View":
     st.title("Cluster View")
 
-    @st.cache_data(ttl=300)
-    def _load_clusters():
-        import pandas as pd
-        from src.config import GOLD_CLUSTER_RISK_SUMMARY_DIR
-        files = list(GOLD_CLUSTER_RISK_SUMMARY_DIR.rglob("*.parquet"))
-        if not files:
-            return pd.DataFrame()
-        try:
-            dfs = [pd.read_parquet(f) for f in files]
-            df = pd.concat(dfs, ignore_index=True)
-            return df[df["cluster_size"] > 0] if "cluster_size" in df.columns else df
-        except Exception as e:
-            return pd.DataFrame()
-
-    clusters = _load_clusters()
+    clusters = _cluster_overview(snapshot_date)
+    if not clusters.empty and "cluster_size" in clusters.columns:
+        clusters = clusters[clusters["cluster_size"] > 0]
 
     if _no_data(clusters, "Cluster data not yet generated — run the clustering job first."):
         st.stop()
@@ -494,7 +485,7 @@ elif page == "Capacity Simulator":
 
     # ---- Strategy comparison table -----------------------------------------
     st.subheader("Strategy Comparison (one-day snapshot)")
-    comp = _strategy_comparison()
+    comp = _strategy_comparison(snapshot_date)
     if not _no_data(comp):
         display_comp = [c for c in [
             "strategy", "kev_coverage", "epss_expected_mitigated",

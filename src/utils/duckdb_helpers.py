@@ -108,38 +108,40 @@ def top_n_vulnerabilities(
     """
     return query_parquet(sql, params if params else None)
 
-def cluster_overview() -> pd.DataFrame:
-    import pandas as pd
-    base = GOLD_CLUSTER_RISK_SUMMARY_DIR
-    parquet_files = list(base.rglob("*.parquet"))
-    if not parquet_files:
-        return pd.DataFrame()
-    try:
-        dfs = [pd.read_parquet(f) for f in parquet_files]
-        return pd.concat(dfs, ignore_index=True).sort_values("kev_density", ascending=False)
-    except Exception as e:
-        _log.warning("cluster_overview failed: %s", e)
-        return pd.DataFrame()
+def cluster_overview(snapshot_date: str | None = None) -> pd.DataFrame:
+    """Return cluster risk summary rows, optionally restricted to one snapshot."""
+    glob = _glob(GOLD_CLUSTER_RISK_SUMMARY_DIR)
+    conditions = []
+    params: list[Any] = []
+    if snapshot_date:
+        conditions.append("snapshot_date = ?")
+        params.append(snapshot_date)
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    sql = f"""
+        SELECT *
+        FROM read_parquet('{glob}', hive_partitioning=true, union_by_name=true)
+        {where_clause}
+        ORDER BY kev_density DESC
+    """
+    return query_parquet(sql, params if params else None)
 
 
-def strategy_comparison() -> pd.DataFrame:
-    """Return the strategy comparison table."""
-    # Try hive-partitioned first, fall back to flat
+def strategy_comparison(snapshot_date: str | None = None) -> pd.DataFrame:
+    """Return the strategy comparison table, optionally restricted to one snapshot."""
     glob = _glob(GOLD_STRATEGY_COMPARISON_DIR)
-    try:
-        sql = f"SELECT * FROM read_parquet('{glob}', union_by_name=true) ORDER BY kev_coverage DESC"
-        df = query_parquet(sql)
-        if df.empty:
-            raise ValueError("empty")
-        return df
-    except Exception:
-        # Try reading the flat file directly
-        flat = str(GOLD_STRATEGY_COMPARISON_DIR / "part-00000.parquet")
-        try:
-            import pandas as pd
-            return pd.read_parquet(flat)
-        except Exception:
-            return pd.DataFrame()
+    conditions = []
+    params: list[Any] = []
+    if snapshot_date:
+        conditions.append("snapshot_date = ?")
+        params.append(snapshot_date)
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    sql = f"""
+        SELECT *
+        FROM read_parquet('{glob}', hive_partitioning=true, union_by_name=true)
+        {where_clause}
+        ORDER BY kev_coverage DESC
+    """
+    return query_parquet(sql, params if params else None)
 
 
 def remediation_actions(top_n: int = 50, snapshot_date: str | None = None) -> pd.DataFrame:
@@ -171,25 +173,23 @@ def remediation_actions(top_n: int = 50, snapshot_date: str | None = None) -> pd
     return query_parquet(sql)
 
 
-def data_quality_latest() -> pd.DataFrame:
-    """Return the most recent data-quality summary metrics."""
-    import pandas as pd
-
-    # Read from the summary subfolder which has the main metrics
+def data_quality_latest(snapshot_date: str | None = None) -> pd.DataFrame:
+    """Return data-quality summary metrics, optionally restricted to one snapshot."""
     summary_dir = GOLD_DATA_QUALITY_DIR / "summary"
-    if not summary_dir.exists():
-        return pd.DataFrame()
-
-    files = list(summary_dir.rglob("*.parquet"))
-    if not files:
-        return pd.DataFrame()
-
-    try:
-        dfs = [pd.read_parquet(f) for f in files]
-        return pd.concat(dfs, ignore_index=True)
-    except Exception as e:
-        _log.warning("data_quality_latest failed: %s", e)
-        return pd.DataFrame()
+    glob = _glob(summary_dir)
+    conditions = []
+    params: list[Any] = []
+    if snapshot_date:
+        conditions.append("snapshot_date = ?")
+        params.append(snapshot_date)
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    sql = f"""
+        SELECT *
+        FROM read_parquet('{glob}', hive_partitioning=true, union_by_name=true)
+        {where_clause}
+        ORDER BY snapshot_date DESC
+    """
+    return query_parquet(sql, params if params else None)
 
 
 def simulation_timeseries(snapshot_date: str | None = None) -> pd.DataFrame:

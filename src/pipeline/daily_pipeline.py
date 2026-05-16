@@ -132,6 +132,7 @@ def build_steps(
             name="capacity_simulation",
             script="src/optimization/capacity_simulation.py",
             args=common_driver + (
+                *common_snapshot,
                 "--daily-capacity", str(daily_capacity),
                 "--simulation-days", str(simulation_days),
             ),
@@ -140,7 +141,7 @@ def build_steps(
         Step(
             name="remediation_actions",
             script="src/optimization/remediation_actions.py",
-            args=common_driver,
+            args=common_driver + common_snapshot,
             owner="C",
         ),
     ]
