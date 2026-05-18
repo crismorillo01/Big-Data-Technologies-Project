@@ -3,33 +3,33 @@
 Five pages accessed via the sidebar:
   1. Overview          — KPIs, data-quality cards, severity chart
   2. Vulnerability Explorer — searchable/filterable CVE table with detail view
-  3. Cluster View      — cluster cards, PCA scatter, top keywords
-  4. Capacity Simulator — sliders, strategy picker, comparison chart
+  3. Cluster View      — cluster cards, bubble chart, top risky clusters
+  4. Capacity Simulator — strategy comparison, multi-day simulation chart
   5. Remediation Plan  — ranked action table, CSV download
 
 All data is read from the gold layer via src.utils.duckdb_helpers.
-Every DuckDB query is wrapped in @st.cache_data for performance.
+No direct pd.read_parquet() calls in this file.
 """
 
 from __future__ import annotations
 
+import datetime
 import sys
 from pathlib import Path
 
-# Make `from src.x import y` work when launched with `streamlit run app/streamlit_app.py`
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 
 from src.utils.duckdb_helpers import (
     available_snapshots,
     cluster_overview,
     data_quality_latest,
+    overview_stats,
     remediation_actions,
     simulation_timeseries,
     strategy_comparison,
@@ -47,95 +47,32 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------------------------
-# Cached data loaders
+# Cached data loaders — all route through duckdb_helpers
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=300)
-def _overview_stats(snapshot_date):
-    import pandas as pd
-    from src.config import GOLD_VULN_SCORES_FINAL_DIR
-
-    base = GOLD_VULN_SCORES_FINAL_DIR
-    folders = [
-        p.name.replace("snapshot_date=", "")
-        for p in base.iterdir()
-        if p.is_dir() and p.name.startswith("snapshot_date=")
-    ] if base.exists() else []
-
-    actual_date = str(snapshot_date)[:10] if snapshot_date else None
-    if actual_date and actual_date not in folders:
-        return pd.DataFrame()
-    if not actual_date:
-        actual_date = sorted(folders, reverse=True)[0] if folders else None
-    if not actual_date:
-        return pd.DataFrame()
-
-    files = list((base / f"snapshot_date={actual_date}").rglob("*.parquet"))
-    if not files:
-        files = list(base.rglob("*.parquet"))
-    if not files:
-        return pd.DataFrame()
-
-    dfs = [pd.read_parquet(f, columns=[
-        "cve_id", "is_kev", "epss_score",
-        "priority_level_final", "cvss_severity"
-    ]) for f in files]
-    return pd.concat(dfs, ignore_index=True).drop_duplicates(subset="cve_id")
+def _overview_stats(snapshot_date: str) -> pd.DataFrame:
+    return overview_stats(snapshot_date)
 
 @st.cache_data(ttl=300)
 def _top_vulns(n, min_priority, only_kev, vendor, snapshot_date):
-    import pandas as pd
-    from src.config import GOLD_VULN_SCORES_FINAL_DIR
-
-    base = GOLD_VULN_SCORES_FINAL_DIR
-    folders = [
-        p.name.replace("snapshot_date=", "")
-        for p in base.iterdir()
-        if p.is_dir() and p.name.startswith("snapshot_date=")
-    ] if base.exists() else []
-
-    actual_date = snapshot_date if snapshot_date in folders else None
-    if snapshot_date and snapshot_date not in folders:
-        return pd.DataFrame()
-    if not actual_date:
-        actual_date = sorted(folders, reverse=True)[0] if folders else None
-    if not actual_date:
-        return pd.DataFrame()
-
-    files = list((base / f"snapshot_date={actual_date}").rglob("*.parquet"))
-    if not files:
-        files = list(base.rglob("*.parquet"))
-    if not files:
-        return pd.DataFrame()
-
-    dfs = [pd.read_parquet(f) for f in files]
-    df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset="cve_id")
-
-    # Apply filters
-    if "priority_score_final" in df.columns:
-        df = df[df["priority_score_final"] >= min_priority]
-    if only_kev and "is_kev" in df.columns:
-        df = df[df["is_kev"] == 1]
-    if vendor and "primary_vendor" in df.columns:
-        df = df[df["primary_vendor"].str.contains(vendor, case=False, na=False)]
-
-    return df.nlargest(n, "priority_score_final") if "priority_score_final" in df.columns else df.head(n)
+    return top_n_vulnerabilities(n, min_priority, only_kev, vendor or None, snapshot_date or None)
 
 @st.cache_data(ttl=300)
-def _cluster_overview(snapshot_date):
-    return cluster_overview(snapshot_date or None)
+def _cluster_overview():
+    return cluster_overview()
 
 @st.cache_data(ttl=300)
-def _strategy_comparison(snapshot_date):
-    return strategy_comparison(snapshot_date or None)
+def _strategy_comparison():
+    return strategy_comparison()
 
 @st.cache_data(ttl=300)
 def _remediation_actions(top_n, snapshot_date):
     return remediation_actions(top_n, snapshot_date or None)
 
 @st.cache_data(ttl=300)
-def _data_quality(snapshot_date):
-    return data_quality_latest(snapshot_date or None)
+def _data_quality():
+    return data_quality_latest()
 
 @st.cache_data(ttl=300)
 def _simulation_timeseries(snapshot_date):
@@ -152,11 +89,12 @@ def _available_snapshots():
 st.sidebar.title("🛡️ VulnIntel Platform")
 page = st.sidebar.radio(
     "Navigate",
-    ["Overview", "Vulnerability Explorer", "Cluster View", "Capacity Simulator", "Remediation Plan"],
+    ["Overview", "Vulnerability Explorer", "Cluster View",
+     "Capacity Simulator", "Remediation Plan"],
 )
 
+# Snapshot date selector
 snapshots = _available_snapshots()
-
 st.sidebar.markdown("### Snapshot date")
 date_mode = st.sidebar.radio("Select mode", ["Latest", "Choose from list", "Pick any date"])
 
@@ -169,10 +107,9 @@ elif date_mode == "Choose from list":
         options=snapshots if snapshots else ["(none)"],
         format_func=lambda x: str(x)[:10],
     )
-    snapshot_date = str(snapshot_date)[:10] if snapshot_date else None
+    snapshot_date = str(snapshot_date)[:10] if snapshot_date and snapshot_date != "(none)" else None
 
-elif date_mode == "Pick any date":
-    import datetime
+else:  # Pick any date
     picked = st.sidebar.date_input(
         "Pick a date",
         value=datetime.date.today(),
@@ -180,21 +117,28 @@ elif date_mode == "Pick any date":
         max_value=datetime.date.today(),
     )
     snapshot_date = str(picked)
-    if snapshot_date not in snapshots:
-        st.sidebar.warning(f"No pipeline data for {snapshot_date}.")
+    if snapshots and snapshot_date not in snapshots:
+        st.sidebar.warning(f"No pipeline data for {snapshot_date}. Showing latest instead.")
+        snapshot_date = snapshots[0] if snapshots else None
+
+# Ensure clean YYYY-MM-DD string
+if snapshot_date:
+    snapshot_date = str(snapshot_date)[:10]
 
 st.sidebar.markdown("---")
 st.sidebar.caption("Data: NVD · CISA KEV · EPSS")
 
+
 # ---------------------------------------------------------------------------
-# Helper: empty-state guard
+# Helper
 # ---------------------------------------------------------------------------
 
-def _no_data(df: pd.DataFrame, message: str = "No data available for this snapshot.") -> bool:
+def _no_data(df: pd.DataFrame, message: str = "No data available.") -> bool:
     if df is None or df.empty:
         st.info(message)
         return True
     return False
+
 
 # ---------------------------------------------------------------------------
 # Page 1 — Overview
@@ -203,44 +147,36 @@ def _no_data(df: pd.DataFrame, message: str = "No data available for this snapsh
 if page == "Overview":
     st.title("Overview")
 
-    dq = _data_quality(snapshot_date)
-    scores = _overview_stats(snapshot_date)
+    full_df = _overview_stats(snapshot_date or "")
+    dq = _data_quality()
 
     # ---- KPI row -----------------------------------------------------------
-    # Use the full dataset for KPIs, not the limited top_n
-    full_df = full_df = _overview_stats(str(snapshot_date)[:10] if snapshot_date else "")
-
     col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         st.metric("Total CVEs", f"{len(full_df):,}" if not full_df.empty else "—")
     with col2:
-        n_kev = int(full_df["is_kev"].sum()) if not full_df.empty else 0
+        n_kev = int(full_df["is_kev"].sum()) if not full_df.empty and "is_kev" in full_df.columns else 0
         st.metric("CISA KEV", f"{n_kev:,}")
     with col3:
         pct_crit = (
             100 * (full_df["priority_level_final"] == "Critical").mean()
             if not full_df.empty and "priority_level_final" in full_df.columns else 0
         )
-        st.metric("% Critical", f"{pct_crit:.1f}%")
+        st.metric("% Critical", f"{pct_crit:.1f}%" if not full_df.empty else "—")
     with col4:
-        mean_epss = full_df["epss_score"].mean() if not full_df.empty else 0
-        st.metric("Mean EPSS", f"{mean_epss:.3f}")
+        mean_epss = full_df["epss_score"].mean() if not full_df.empty and "epss_score" in full_df.columns else 0
+        st.metric("Mean EPSS", f"{mean_epss:.3f}" if not full_df.empty else "—")
     with col5:
-        actual = str(snapshot_date)[:10] if snapshot_date else "—"
-        st.metric("Snapshot", actual)
-
-    # Use full_df for severity chart too
-    scores = full_df  # replace the old `scores` variable
+        st.metric("Snapshot", snapshot_date or "—")
 
     st.markdown("---")
 
     # ---- Severity distribution chart ---------------------------------------
     st.subheader("Severity Distribution")
-    if not scores.empty and "cvss_severity" in scores.columns:
+    if not full_df.empty and "cvss_severity" in full_df.columns:
         sev_order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "NONE"]
         sev_counts = (
-            scores["cvss_severity"]
-            .str.upper()
+            full_df["cvss_severity"].str.upper()
             .value_counts()
             .reindex(sev_order, fill_value=0)
             .reset_index()
@@ -260,48 +196,46 @@ if page == "Overview":
     else:
         st.info("Severity data not available.")
 
-    # ---- Data-quality cards ------------------------------------------------
+    # ---- Data quality ------------------------------------------------------
+    st.markdown("---")
     st.subheader("Data Quality")
     if not _no_data(dq, "Data quality metrics not yet generated."):
         try:
             latest = dq.tail(1).copy()
-
-            # Split into logical groups for better display
             col_a, col_b = st.columns(2)
-
             with col_a:
                 st.markdown("**Coverage**")
                 coverage = {
-                    "Total CVEs": f"{int(latest['row_count'].iloc[0]):,}",
-                    "Distinct CVEs": f"{int(latest['distinct_cve_count'].iloc[0]):,}",
-                    "KEV CVEs": f"{int(latest['kev_count'].iloc[0]):,}",
-                    "NVD ∩ KEV": f"{int(latest['nvd_kev_intersection'].iloc[0]):,}",
-                    "NVD ∩ EPSS": f"{int(latest['nvd_epss_intersection'].iloc[0]):,}",
+                    "Total CVEs":       f"{int(latest['row_count'].iloc[0]):,}",
+                    "Distinct CVEs":    f"{int(latest['distinct_cve_count'].iloc[0]):,}",
+                    "KEV CVEs":         f"{int(latest['kev_count'].iloc[0]):,}",
+                    "NVD ∩ KEV":        f"{int(latest['nvd_kev_intersection'].iloc[0]):,}",
+                    "NVD ∩ EPSS":       f"{int(latest['nvd_epss_intersection'].iloc[0]):,}",
                     "NVD ∩ KEV ∩ EPSS": f"{int(latest['nvd_kev_epss_intersection'].iloc[0]):,}",
                 }
                 st.dataframe(
                     pd.DataFrame(coverage.items(), columns=["Metric", "Value"]),
-                    hide_index=True, use_container_width=True
+                    hide_index=True, use_container_width=True,
                 )
-
             with col_b:
-                st.markdown("**Data Completeness & EPSS**")
+                st.markdown("**Completeness & EPSS**")
                 quality = {
-                    "% Null CVSS": f"{float(latest['pct_null_cvss'].iloc[0]):.2f}%",
-                    "% Null EPSS": f"{float(latest['pct_null_epss'].iloc[0]):.2f}%",
-                    "% Null CWEs": f"{float(latest['pct_null_cwes'].iloc[0]):.2f}%",
-                    "% Null CPE":  f"{float(latest['pct_null_cpe'].iloc[0]):.2f}%",
-                    "Mean EPSS":   f"{float(latest['mean_epss'].iloc[0]):.4f}",
-                    "Median EPSS": f"{float(latest['median_epss'].iloc[0]):.4f}",
-                    "% EPSS > 0.7": f"{float(latest['pct_epss_gt_07'].iloc[0]):.2f}%",
-                    "% EPSS > 0.9": f"{float(latest['pct_epss_gt_09'].iloc[0]):.2f}%",
+                    "% Null CVSS":   f"{float(latest['pct_null_cvss'].iloc[0]):.2f}%",
+                    "% Null EPSS":   f"{float(latest['pct_null_epss'].iloc[0]):.2f}%",
+                    "% Null CWEs":   f"{float(latest['pct_null_cwes'].iloc[0]):.2f}%",
+                    "% Null CPE":    f"{float(latest['pct_null_cpe'].iloc[0]):.2f}%",
+                    "Mean EPSS":     f"{float(latest['mean_epss'].iloc[0]):.4f}",
+                    "Median EPSS":   f"{float(latest['median_epss'].iloc[0]):.4f}",
+                    "% EPSS > 0.7":  f"{float(latest['pct_epss_gt_07'].iloc[0]):.2f}%",
+                    "% EPSS > 0.9":  f"{float(latest['pct_epss_gt_09'].iloc[0]):.2f}%",
                 }
                 st.dataframe(
                     pd.DataFrame(quality.items(), columns=["Metric", "Value"]),
-                    hide_index=True, use_container_width=True
+                    hide_index=True, use_container_width=True,
                 )
         except Exception as e:
             st.warning(f"Could not render data quality table: {e}")
+
 
 # ---------------------------------------------------------------------------
 # Page 2 — Vulnerability Explorer
@@ -310,7 +244,6 @@ if page == "Overview":
 elif page == "Vulnerability Explorer":
     st.title("Vulnerability Explorer")
 
-    # ---- Filters -----------------------------------------------------------
     f1, f2, f3, f4 = st.columns(4)
     with f1:
         severity_filter = st.selectbox("Priority Level", ["All", "Critical", "High", "Medium", "Low"])
@@ -325,16 +258,10 @@ elif page == "Vulnerability Explorer":
         severity_filter, 0.0
     )
 
-    df = _top_vulns(500, min_priority, kev_only, None, snapshot_date)
+    df = _top_vulns(500, min_priority, kev_only, vendor_filter or None, snapshot_date)
 
-    if not df.empty:
-        if vendor_filter:
-            mask = df.get("primary_vendor", pd.Series(dtype=str)).str.contains(
-                vendor_filter, case=False, na=False
-            )
-            df = df[mask]
-        if min_epss > 0 and "epss_score" in df.columns:
-            df = df[df["epss_score"] >= min_epss]
+    if not df.empty and min_epss > 0 and "epss_score" in df.columns:
+        df = df[df["epss_score"] >= min_epss]
 
     st.caption(f"{len(df):,} CVEs match your filters.")
 
@@ -346,26 +273,26 @@ elif page == "Vulnerability Explorer":
         ] if c in df.columns]
         st.dataframe(df[display_cols].reset_index(drop=True), use_container_width=True)
 
-        # ---- Detail view ---------------------------------------------------
         st.markdown("---")
         st.subheader("CVE Detail")
-        cve_choice = st.selectbox("Select CVE", options=df["cve_id"].tolist() if "cve_id" in df.columns else [])
+        cve_choice = st.selectbox(
+            "Select CVE",
+            options=df["cve_id"].tolist() if "cve_id" in df.columns else [],
+        )
         if cve_choice:
             row = df[df["cve_id"] == cve_choice].iloc[0]
-            detail_cols = st.columns(3)
-            with detail_cols[0]:
+            d1, d2, d3 = st.columns(3)
+            with d1:
                 st.markdown(f"**CVE ID:** {row.get('cve_id', '—')}")
                 st.markdown(f"**CVSS Score:** {row.get('cvss_score', '—')} ({row.get('cvss_severity', '—')})")
                 st.markdown(f"**Priority Score:** {row.get('priority_score_final', '—')}")
                 st.markdown(f"**Priority Level:** {row.get('priority_level_final', '—')}")
-            with detail_cols[1]:
+            with d2:
                 st.markdown(f"**EPSS Score:** {row.get('epss_score', '—')}")
                 st.markdown(f"**In KEV:** {'✅ Yes' if row.get('is_kev') == 1 else '❌ No'}")
-                if row.get("is_ransomware"):
-                    st.markdown("**⚠️ Ransomware campaign use**")
                 st.markdown(f"**Vendor:** {row.get('primary_vendor', '—')}")
                 st.markdown(f"**Product:** {row.get('primary_product', '—')}")
-            with detail_cols[2]:
+            with d3:
                 st.markdown(f"**Published:** {row.get('published', '—')}")
                 st.markdown(f"**Last Modified:** {row.get('last_modified', '—')}")
                 if row.get("kev_required_action"):
@@ -374,6 +301,7 @@ elif page == "Vulnerability Explorer":
                 st.markdown("**Description:**")
                 st.write(row["description"])
 
+
 # ---------------------------------------------------------------------------
 # Page 3 — Cluster View
 # ---------------------------------------------------------------------------
@@ -381,16 +309,14 @@ elif page == "Vulnerability Explorer":
 elif page == "Cluster View":
     st.title("Cluster View")
 
-    clusters = _cluster_overview(snapshot_date)
-    if not clusters.empty and "cluster_size" in clusters.columns:
-        clusters = clusters[clusters["cluster_size"] > 0]
+    clusters = _cluster_overview()
 
-    if _no_data(clusters, "Cluster data not yet generated — run the clustering job first."):
+    if _no_data(clusters, "Cluster data not yet generated — run capacity_simulation first."):
         st.stop()
 
     st.caption(f"{len(clusters)} clusters found.")
 
-    # ---- Summary metrics ---------------------------------------------------
+    # Summary metrics
     c1, c2, c3 = st.columns(3)
     with c1:
         st.metric("Total Clusters", len(clusters))
@@ -403,43 +329,36 @@ elif page == "Cluster View":
 
     st.markdown("---")
 
-    # ---- Cluster risk table ------------------------------------------------
+    # Cluster risk table
     st.subheader("Cluster Risk Summary")
     display_cols = [c for c in [
         "cluster_id", "cluster_size", "kev_density", "n_kev",
         "avg_priority_final", "avg_cvss", "avg_epss", "max_epss",
     ] if c in clusters.columns]
-
-    # Round numeric columns for display
     display_df = clusters[display_cols].copy()
     for col in ["kev_density", "avg_priority_final", "avg_cvss", "avg_epss", "max_epss"]:
         if col in display_df.columns:
             display_df[col] = display_df[col].round(4)
-
     st.dataframe(
         display_df.sort_values("kev_density", ascending=False).reset_index(drop=True),
-        use_container_width=True,
-        hide_index=True,
+        use_container_width=True, hide_index=True,
     )
 
     st.markdown("---")
 
-    # ---- Bubble chart ------------------------------------------------------
+    # Bubble chart
     st.subheader("Cluster Map: EPSS vs KEV Density")
     if all(c in clusters.columns for c in ["avg_epss", "kev_density", "cluster_size"]):
         fig = px.scatter(
             clusters,
-            x="avg_epss",
-            y="kev_density",
-            size="cluster_size",
+            x="avg_epss", y="kev_density", size="cluster_size",
             color="avg_priority_final" if "avg_priority_final" in clusters.columns else None,
             hover_name="cluster_id",
             hover_data=["cluster_size", "n_kev", "avg_cvss"],
             labels={
                 "avg_epss": "Mean EPSS Score",
-                "kev_density": "KEV Density (fraction of KEV CVEs)",
+                "kev_density": "KEV Density",
                 "cluster_size": "Cluster Size",
-                "avg_priority_final": "Avg Priority",
             },
             title="Clusters: EPSS vs KEV Density (bubble size = cluster size)",
             color_continuous_scale="Reds",
@@ -447,22 +366,27 @@ elif page == "Cluster View":
         fig.update_layout(height=500)
         st.plotly_chart(fig, use_container_width=True)
 
-    # ---- Top risky clusters ------------------------------------------------
+    # Top 5 riskiest clusters
     st.markdown("---")
     st.subheader("Top 5 Riskiest Clusters")
     if "kev_density" in clusters.columns:
         top5 = clusters.nlargest(5, "kev_density")
         for _, row in top5.iterrows():
-            with st.expander(f"Cluster {int(row['cluster_id'])} — {int(row['cluster_size'])} CVEs, KEV density: {row['kev_density']:.2%}"):
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
+            with st.expander(
+                f"Cluster {int(row['cluster_id'])} — "
+                f"{int(row['cluster_size'])} CVEs, "
+                f"KEV density: {row['kev_density']:.2%}"
+            ):
+                m1, m2, m3, m4 = st.columns(4)
+                with m1:
                     st.metric("Size", f"{int(row['cluster_size']):,}")
-                with col2:
+                with m2:
                     st.metric("KEV CVEs", f"{int(row['n_kev']):,}")
-                with col3:
+                with m3:
                     st.metric("Avg CVSS", f"{row['avg_cvss']:.2f}")
-                with col4:
+                with m4:
                     st.metric("Max EPSS", f"{row['max_epss']:.4f}")
+
 
 # ---------------------------------------------------------------------------
 # Page 4 — Capacity Simulator
@@ -471,7 +395,6 @@ elif page == "Cluster View":
 elif page == "Capacity Simulator":
     st.title("Capacity Simulator")
 
-    # ---- Controls ----------------------------------------------------------
     c1, c2, c3 = st.columns(3)
     with c1:
         daily_cap = st.slider("Daily Capacity (CVEs/day)", 10, 200, 50)
@@ -483,21 +406,20 @@ elif page == "Capacity Simulator":
             ["top_priority", "high_epss", "cluster_based", "kev_first", "hybrid"],
         )
 
-    # ---- Strategy comparison table -----------------------------------------
+    # Strategy comparison table
     st.subheader("Strategy Comparison (one-day snapshot)")
-    comp = _strategy_comparison(snapshot_date)
+    comp = _strategy_comparison()
     if not _no_data(comp):
         display_comp = [c for c in [
             "strategy", "kev_coverage", "epss_expected_mitigated",
             "cluster_diversity", "mean_priority_selected", "n_selected",
         ] if c in comp.columns]
-        styled = comp[display_comp].style.highlight_max(
-            subset=[c for c in ["kev_coverage", "epss_expected_mitigated", "cluster_diversity"] if c in comp.columns],
-            color="#d4edda",
-        )
+        num_cols = [c for c in ["kev_coverage", "epss_expected_mitigated", "cluster_diversity"]
+                    if c in comp.columns]
+        styled = comp[display_comp].style.highlight_max(subset=num_cols, color="#d4edda")
         st.dataframe(styled, use_container_width=True)
 
-    # ---- Multi-day timeseries chart ----------------------------------------
+    # Multi-day simulation
     st.subheader("Multi-day Simulation")
     ts = _simulation_timeseries(snapshot_date)
     if not _no_data(ts, "Simulation timeseries not yet generated."):
@@ -507,18 +429,15 @@ elif page == "Capacity Simulator":
         )
         if metric_choice in ts.columns and "day" in ts.columns and "strategy" in ts.columns:
             fig = px.line(
-                ts,
-                x="day",
-                y=metric_choice,
-                color="strategy",
-                title=f"{metric_choice} over time (all strategies)",
+                ts, x="day", y=metric_choice, color="strategy",
+                title=f"{metric_choice.replace('_', ' ').title()} over time",
                 labels={"day": "Day", metric_choice: metric_choice.replace("_", " ").title()},
             )
-            # Highlight selected strategy with a thicker line
             for trace in fig.data:
                 if trace.name == strategy_pick:
                     trace.line.width = 4
             st.plotly_chart(fig, use_container_width=True)
+
 
 # ---------------------------------------------------------------------------
 # Page 5 — Remediation Plan
@@ -535,17 +454,13 @@ elif page == "Remediation Plan":
         st.stop()
 
     display_cols = [c for c in [
-        "primary_vendor", "primary_product",
-        "n_cves", "n_kev", "max_priority", "sum_priority",
-        "mean_epss", "max_epss", "effort_proxy", "action_score",
+        "primary_vendor", "primary_product", "n_cves", "n_kev",
+        "max_priority", "sum_priority", "mean_epss", "max_epss",
+        "effort_proxy", "action_score",
     ] if c in actions.columns]
+    st.dataframe(actions[display_cols].reset_index(drop=True), use_container_width=True)
 
-    st.dataframe(
-        actions[display_cols].reset_index(drop=True),
-        use_container_width=True,
-    )
-
-    # ---- Top CVEs evidence -------------------------------------------------
+    # Evidence CVEs
     st.markdown("---")
     st.subheader("Evidence CVEs")
     if "primary_vendor" in actions.columns and "primary_product" in actions.columns:
@@ -557,18 +472,18 @@ elif page == "Remediation Plan":
         if selected_action:
             vendor, product = selected_action.split(" / ", 1)
             row = actions[
-                (actions["primary_vendor"] == vendor) & (actions["primary_product"] == product)
+                (actions["primary_vendor"] == vendor) &
+                (actions["primary_product"] == product)
             ]
             if not row.empty and "top_cves" in row.columns:
                 cves = row.iloc[0]["top_cves"]
                 if cves is not None and len(cves) > 0:
                     st.markdown(f"**Top CVEs for {vendor}/{product}:**")
-                    cve_list = list(cves) if not isinstance(cves, list) else cves
-                    for cve in cve_list:
+                    for cve in list(cves):
                         if cve:
                             st.markdown(f"- `{cve}`")
 
-    # ---- CSV download ------------------------------------------------------
+    # CSV download
     st.markdown("---")
     csv_data = actions[display_cols].to_csv(index=False).encode("utf-8")
     st.download_button(

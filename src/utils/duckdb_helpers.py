@@ -1,13 +1,12 @@
 """DuckDB helpers for the Streamlit app and analysis notebooks.
 
-Every query the app makes goes through this module.  The helpers:
-- register no persistent tables; they use DuckDB's `read_parquet()` glob
+Every query the app makes goes through this module. The helpers:
+- register no persistent tables; they use DuckDB's read_parquet() glob
   to scan the gold-layer Parquet files with predicate pushdown.
-- return plain ``pandas.DataFrame`` objects ready for Streamlit / Plotly.
-- use parameterised SQL (`?` placeholders) so no f-string SQL injection is
-  possible.
+- return plain pandas.DataFrame objects ready for Streamlit / Plotly.
+- use parameterised SQL (? placeholders) so no f-string SQL injection is possible.
 
-All gold-layer paths come from ``src.config``. No raw path strings live here.
+All gold-layer paths come from src.config. No raw path strings live here.
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ from src.config import (
     GOLD_CLUSTER_RISK_SUMMARY_DIR,
     GOLD_CLUSTER_TOPICS_DIR,
     GOLD_DATA_QUALITY_DIR,
-    GOLD_MASTER_DIR,
     GOLD_REMEDIATION_ACTIONS_DIR,
     GOLD_SIMULATION_TIMESERIES_DIR,
     GOLD_STRATEGY_COMPARISON_DIR,
@@ -32,190 +30,268 @@ from src.config import (
 
 _log = logging.getLogger(__name__)
 
+
 # ---------------------------------------------------------------------------
 # Connection
 # ---------------------------------------------------------------------------
 
 def get_connection() -> duckdb.DuckDBPyConnection:
-    """Return a fresh in-memory DuckDB connection.
-
-    Each connection is independent; we create one per query rather than
-    holding a long-lived singleton so the app is safe to run in Streamlit's
-    threaded/process model.
-    """
+    """Return a fresh in-memory DuckDB connection."""
     return duckdb.connect(database=":memory:")
 
 
 # ---------------------------------------------------------------------------
-# Low-level helper
+# Low-level helpers
 # ---------------------------------------------------------------------------
 
+def _glob(path: Path) -> str:
+    """Return a DuckDB-compatible glob for all parquet files under path."""
+    return str(path / "**" / "*.parquet")
+
+
+def _latest_snapshot(base_dir: Path) -> str | None:
+    """Return the most recent snapshot_date partition name."""
+    if not base_dir.exists():
+        return None
+    available = sorted([
+        p.name.replace("snapshot_date=", "")
+        for p in base_dir.iterdir()
+        if p.is_dir() and p.name.startswith("snapshot_date=")
+    ], reverse=True)
+    return available[0] if available else None
+
+
+def _resolve_snapshot(base_dir: Path, requested: str | None) -> str | None:
+    """Return requested date if available, else latest, else None."""
+    latest = _latest_snapshot(base_dir)
+    if not latest:
+        return None
+    if requested and requested[:10] == latest:
+        return latest
+    # Check if requested date exists as a partition
+    if requested:
+        req = requested[:10]
+        partition = base_dir / f"snapshot_date={req}"
+        if partition.exists():
+            return req
+    return latest
+
+
 def query_parquet(sql: str, params: list[Any] | None = None) -> pd.DataFrame:
+    """Execute sql and return a DataFrame. Returns empty DataFrame on error."""
     con = get_connection()
     try:
-        if params:
-            result = con.execute(sql, params)
-        else:
-            result = con.execute(sql)
+        result = con.execute(sql, params) if params else con.execute(sql)
         return result.df()
     except Exception as e:
         _log.warning("DuckDB query failed: %s", e)
-        return pd.DataFrame()  # return empty instead of crashing the app
+        return pd.DataFrame()
     finally:
         con.close()
 
 
-def _glob(path: Path) -> str:
-    """Return a DuckDB-compatible glob string for all parquet files under *path*."""
-    return str(path / "**" / "*.parquet")
-
-
 # ---------------------------------------------------------------------------
-# Pre-defined view helpers (used by Streamlit pages)
+# Overview stats — used by Overview KPIs
 # ---------------------------------------------------------------------------
 
-def top_n_vulnerabilities(
-    n=50, min_priority=0.0, only_kev=False, vendor=None, snapshot_date=None
-) -> pd.DataFrame:
-    glob = _glob(GOLD_VULN_SCORES_FINAL_DIR)
-    # Fall back to base scores if final scores don't exist yet
-    if not any(GOLD_VULN_SCORES_FINAL_DIR.rglob("*.parquet")):
-        _log.warning("vulnerability_scores_final not found, trying vulnerability_scores")
-        from src.config import GOLD_VULN_SCORES_DIR
-        glob = _glob(GOLD_VULN_SCORES_DIR)
-        if not any(GOLD_VULN_SCORES_DIR.rglob("*.parquet")):
-            return pd.DataFrame()
+def overview_stats(snapshot_date: str | None = None) -> pd.DataFrame:
+    """Return all CVEs for KPI computation (cve_id, is_kev, epss_score,
+    priority_level_final, cvss_severity) for the given snapshot.
 
-    conditions = ["priority_score >= ?"] if "scores_final" not in glob else ["priority_score_final >= ?"]
-    params: list[Any] = [min_priority]
-    if only_kev:
-        conditions.append("is_kev = 1")
-    if vendor:
-        conditions.append("primary_vendor = ?")
-        params.append(vendor)
-    if snapshot_date:
-        conditions.append("snapshot_date = ?")
-        params.append(snapshot_date)
-
-    where_clause = " AND ".join(conditions)
-    score_col = "priority_score_final" if "scores_final" in glob else "priority_score"
-    sql = f"""
-        SELECT *
-        FROM read_parquet('{glob}', hive_partitioning=true)
-        WHERE {where_clause}
-        ORDER BY {score_col} DESC
-        LIMIT {int(n)}
+    Only loads the columns needed for KPIs — no full row scan.
     """
-    return query_parquet(sql, params if params else None)
+    actual = _resolve_snapshot(GOLD_VULN_SCORES_FINAL_DIR, snapshot_date)
+    if not actual:
+        return pd.DataFrame()
 
-def cluster_overview(snapshot_date: str | None = None) -> pd.DataFrame:
-    """Return cluster risk summary rows, optionally restricted to one snapshot."""
-    glob = _glob(GOLD_CLUSTER_RISK_SUMMARY_DIR)
-    conditions = []
-    params: list[Any] = []
-    if snapshot_date:
-        conditions.append("snapshot_date = ?")
-        params.append(snapshot_date)
-    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-    sql = f"""
-        SELECT *
-        FROM read_parquet('{glob}', hive_partitioning=true, union_by_name=true)
-        {where_clause}
-        ORDER BY kev_density DESC
-    """
-    return query_parquet(sql, params if params else None)
-
-
-def strategy_comparison(snapshot_date: str | None = None) -> pd.DataFrame:
-    """Return the strategy comparison table, optionally restricted to one snapshot."""
-    glob = _glob(GOLD_STRATEGY_COMPARISON_DIR)
-    conditions = []
-    params: list[Any] = []
-    if snapshot_date:
-        conditions.append("snapshot_date = ?")
-        params.append(snapshot_date)
-    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-    sql = f"""
-        SELECT *
-        FROM read_parquet('{glob}', hive_partitioning=true, union_by_name=true)
-        {where_clause}
-        ORDER BY kev_coverage DESC
-    """
-    return query_parquet(sql, params if params else None)
-
-
-def remediation_actions(top_n: int = 50, snapshot_date: str | None = None) -> pd.DataFrame:
-    """Return the top-N remediation actions ordered by action_score.
-
-    Parameters
-    ----------
-    top_n         : Maximum rows to return.
-    snapshot_date : If set, restrict to that snapshot partition.
-    """
-    glob = _glob(GOLD_REMEDIATION_ACTIONS_DIR)
-
-    if snapshot_date:
-        sql = f"""
-            SELECT *
-            FROM read_parquet('{glob}', hive_partitioning=true)
-            WHERE snapshot_date = ?
-            ORDER BY action_score DESC
-            LIMIT {int(top_n)}
-        """
-        return query_parquet(sql, [snapshot_date])
+    partition = GOLD_VULN_SCORES_FINAL_DIR / f"snapshot_date={actual}"
+    glob = str(partition / "*.parquet")
 
     sql = f"""
-        SELECT *
-        FROM read_parquet('{glob}', hive_partitioning=true)
-        ORDER BY action_score DESC
-        LIMIT {int(top_n)}
+        SELECT
+            cve_id,
+            is_kev,
+            epss_score,
+            priority_level_final,
+            cvss_severity
+        FROM read_parquet('{glob}', union_by_name=true)
     """
     return query_parquet(sql)
 
 
-def data_quality_latest(snapshot_date: str | None = None) -> pd.DataFrame:
-    """Return data-quality summary metrics, optionally restricted to one snapshot."""
-    summary_dir = GOLD_DATA_QUALITY_DIR / "summary"
-    glob = _glob(summary_dir)
-    conditions = []
-    params: list[Any] = []
-    if snapshot_date:
-        conditions.append("snapshot_date = ?")
-        params.append(snapshot_date)
-    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+# ---------------------------------------------------------------------------
+# Top N vulnerabilities — used by Vulnerability Explorer
+# ---------------------------------------------------------------------------
+
+def top_n_vulnerabilities(
+    n: int = 50,
+    min_priority: float = 0.0,
+    only_kev: bool = False,
+    vendor: str | None = None,
+    snapshot_date: str | None = None,
+) -> pd.DataFrame:
+    """Return the top-N scored vulnerabilities."""
+    actual = _resolve_snapshot(GOLD_VULN_SCORES_FINAL_DIR, snapshot_date)
+    if not actual:
+        return pd.DataFrame()
+
+    partition = GOLD_VULN_SCORES_FINAL_DIR / f"snapshot_date={actual}"
+    glob = str(partition / "*.parquet")
+
+    conditions = ["priority_score_final >= ?"]
+    params: list[Any] = [min_priority]
+
+    if only_kev:
+        conditions.append("is_kev = 1")
+    if vendor:
+        conditions.append("primary_vendor ILIKE ?")
+        params.append(f"%{vendor}%")
+
+    where_clause = " AND ".join(conditions)
     sql = f"""
         SELECT *
-        FROM read_parquet('{glob}', hive_partitioning=true, union_by_name=true)
-        {where_clause}
-        ORDER BY snapshot_date DESC
+        FROM read_parquet('{glob}', union_by_name=true)
+        WHERE {where_clause}
+        ORDER BY priority_score_final DESC
+        LIMIT {int(n)}
     """
-    return query_parquet(sql, params if params else None)
+    return query_parquet(sql, params)
 
+
+# ---------------------------------------------------------------------------
+# Cluster overview
+# ---------------------------------------------------------------------------
+
+def cluster_overview() -> pd.DataFrame:
+    """Return cluster risk summary, optionally joined with topics."""
+    risk_glob = _glob(GOLD_CLUSTER_RISK_SUMMARY_DIR)
+
+    # Try joining with topics if available
+    topics_glob = _glob(GOLD_CLUSTER_TOPICS_DIR)
+    try:
+        sql = f"""
+            SELECT r.*,
+                   t.top_keywords,
+                   t.top_vendors AS topic_vendors,
+                   t.top_cwes
+            FROM read_parquet('{risk_glob}', union_by_name=true) r
+            LEFT JOIN read_parquet('{topics_glob}', union_by_name=true) t
+                ON r.cluster_id = t.cluster_id
+            ORDER BY r.kev_density DESC, r.cluster_size DESC
+        """
+        df = query_parquet(sql)
+        if not df.empty:
+            return df
+    except Exception:
+        pass
+
+    # Fallback: just risk summary
+    sql = f"""
+        SELECT *
+        FROM read_parquet('{risk_glob}', union_by_name=true)
+        WHERE cluster_size > 0
+        ORDER BY kev_density DESC, cluster_size DESC
+    """
+    return query_parquet(sql)
+
+
+# ---------------------------------------------------------------------------
+# Strategy comparison
+# ---------------------------------------------------------------------------
+
+def strategy_comparison() -> pd.DataFrame:
+    """Return the strategy comparison table."""
+    glob = _glob(GOLD_STRATEGY_COMPARISON_DIR)
+    sql = f"""
+        SELECT *
+        FROM read_parquet('{glob}', union_by_name=true)
+        ORDER BY kev_coverage DESC
+    """
+    return query_parquet(sql)
+
+
+# ---------------------------------------------------------------------------
+# Remediation actions
+# ---------------------------------------------------------------------------
+
+def remediation_actions(
+    top_n: int = 50,
+    snapshot_date: str | None = None,
+) -> pd.DataFrame:
+    """Return the top-N remediation actions ordered by action_score."""
+    actual = _resolve_snapshot(GOLD_REMEDIATION_ACTIONS_DIR, snapshot_date)
+    glob = _glob(GOLD_REMEDIATION_ACTIONS_DIR)
+
+    if actual:
+        sql = f"""
+            SELECT *
+            FROM read_parquet('{glob}', hive_partitioning=true, union_by_name=true)
+            WHERE CAST(snapshot_date AS VARCHAR) LIKE '{actual}%'
+            ORDER BY action_score DESC
+            LIMIT {int(top_n)}
+        """
+    else:
+        sql = f"""
+            SELECT *
+            FROM read_parquet('{glob}', union_by_name=true)
+            ORDER BY action_score DESC
+            LIMIT {int(top_n)}
+        """
+    return query_parquet(sql)
+
+
+# ---------------------------------------------------------------------------
+# Data quality
+# ---------------------------------------------------------------------------
+
+def data_quality_latest() -> pd.DataFrame:
+    """Return the most recent data-quality summary metrics."""
+    summary_dir = GOLD_DATA_QUALITY_DIR / "summary"
+    if not summary_dir.exists():
+        return pd.DataFrame()
+    glob = str(summary_dir / "**" / "*.parquet")
+    sql = f"""
+        SELECT *
+        FROM read_parquet('{glob}', union_by_name=true)
+    """
+    return query_parquet(sql)
+
+
+# ---------------------------------------------------------------------------
+# Simulation timeseries
+# ---------------------------------------------------------------------------
 
 def simulation_timeseries(snapshot_date: str | None = None) -> pd.DataFrame:
-    """Return the multi-day simulation timeseries."""
-    import pandas as pd
-    # Try all parquet files under the directory
-    base = GOLD_SIMULATION_TIMESERIES_DIR
-    parquet_files = list(base.rglob("*.parquet"))
-    if not parquet_files:
-        return pd.DataFrame()
-    try:
-        dfs = [pd.read_parquet(f) for f in parquet_files]
-        df = pd.concat(dfs, ignore_index=True)
-        if snapshot_date and "snapshot_date" in df.columns:
-            df = df[df["snapshot_date"].astype(str) == snapshot_date]
-        return df.sort_values(["strategy", "day"]) if "strategy" in df.columns else df
-    except Exception as e:
-        _log.warning("Could not read simulation timeseries: %s", e)
-        return pd.DataFrame()
+    """Return the multi-day simulation timeseries for all strategies."""
+    glob = _glob(GOLD_SIMULATION_TIMESERIES_DIR)
+    actual = _resolve_snapshot(GOLD_SIMULATION_TIMESERIES_DIR, snapshot_date)
 
+    if actual:
+        sql = f"""
+            SELECT *
+            FROM read_parquet('{glob}', union_by_name=true)
+            WHERE CAST(snapshot_date AS VARCHAR) LIKE '{actual}%'
+            ORDER BY strategy, day
+        """
+    else:
+        sql = f"""
+            SELECT *
+            FROM read_parquet('{glob}', union_by_name=true)
+            ORDER BY strategy, day
+        """
+    return query_parquet(sql)
+
+
+# ---------------------------------------------------------------------------
+# Available snapshots
+# ---------------------------------------------------------------------------
 
 def available_snapshots() -> list[str]:
-    """Return all snapshot dates from the gold folder directly (no DuckDB needed)."""
-    available = sorted([
+    """Return all snapshot_date values from folder names — always up to date."""
+    if not GOLD_VULN_SCORES_FINAL_DIR.exists():
+        return []
+    return sorted([
         p.name.replace("snapshot_date=", "")
         for p in GOLD_VULN_SCORES_FINAL_DIR.iterdir()
         if p.is_dir() and p.name.startswith("snapshot_date=")
-    ], reverse=True) if GOLD_VULN_SCORES_FINAL_DIR.exists() else []
-    return available
+    ], reverse=True)
