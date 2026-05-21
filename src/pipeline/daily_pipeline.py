@@ -44,6 +44,7 @@ from src.config import (  # noqa: E402
     DEFAULT_DAILY_CAPACITY,
     DEFAULT_NVD_YEARS,
     DEFAULT_SIMULATION_DAYS,
+    SILVER_NVD_DIR,
     configure_logging,
     get_snapshot_date,
 )
@@ -69,23 +70,48 @@ class Step:
         return _PROJECT_ROOT / self.script
 
 
+def has_existing_nvd_silver(silver_nvd_dir: Path = SILVER_NVD_DIR) -> bool:
+    """Return True when the full NVD silver base already exists."""
+    return silver_nvd_dir.exists() and any(silver_nvd_dir.rglob("*.parquet"))
+
+
 def build_steps(
     nvd_years: list[int],
     daily_capacity: int,
     simulation_days: int,
     driver_memory: str,
     snapshot_date: str,
+    full_nvd_refresh: bool = False,
+    has_nvd_base: bool | None = None,
 ) -> list[Step]:
     """Build the ordered list of pipeline steps."""
     common_driver = ("--driver-memory", driver_memory)
     common_snapshot = ("--snapshot-date", snapshot_date)
+    use_full_nvd_refresh = full_nvd_refresh or not (
+        has_existing_nvd_silver() if has_nvd_base is None else has_nvd_base
+    )
+    nvd_steps = (
+        [
+            Step(
+                name=f"ingest_nvd_{year}",
+                script="src/ingestion/ingest_nvd.py",
+                args=common_driver + ("--force-download", "--years", str(year)),
+                owner="A",
+            )
+            for year in nvd_years
+        ]
+        if use_full_nvd_refresh
+        else [
+            Step(
+                name="ingest_nvd_modified",
+                script="src/ingestion/ingest_nvd_modified.py",
+                args=common_driver + common_snapshot,
+                owner="A",
+            )
+        ]
+    )
     return [
-        Step(
-            name="ingest_nvd",
-            script="src/ingestion/ingest_nvd.py",
-            args=common_driver + ("--years", *map(str, nvd_years)),
-            owner="A",
-        ),
+        *nvd_steps,
         Step(
             name="ingest_kev",
             script="src/ingestion/ingest_kev.py",
@@ -263,6 +289,11 @@ def parse_args() -> argparse.Namespace:
         default=get_snapshot_date(),
         help="Gold-layer snapshot date (YYYY-MM-DD). Default: today UTC.",
     )
+    parser.add_argument(
+        "--full-nvd-refresh",
+        action="store_true",
+        help="Re-download every yearly NVD feed instead of using the daily modified feed.",
+    )
     return parser.parse_args()
 
 
@@ -277,6 +308,7 @@ def main() -> None:
         simulation_days=args.simulation_days,
         driver_memory=args.driver_memory,
         snapshot_date=args.snapshot_date,
+        full_nvd_refresh=args.full_nvd_refresh,
     )
 
     logger.info("Vulnerability intelligence pipeline starting")
@@ -284,6 +316,8 @@ def main() -> None:
     logger.info("  daily_capacity=%d  simulation_days=%d", args.daily_capacity, args.simulation_days)
     logger.info("  driver_memory=%s", args.driver_memory)
     logger.info("  snapshot_date=%s", args.snapshot_date)
+    logger.info("  full_nvd_refresh=%s", args.full_nvd_refresh)
+    logger.info("  nvd_silver_base_exists=%s", has_existing_nvd_silver())
 
     run_pipeline(steps)
 

@@ -25,9 +25,9 @@ Output silver schema
 - ``cvss_score``              : double (fallback v4 → v3.1 → v3.0 → v2)
 - ``cvss_severity``           : string (matched fallback path)
 - ``cvss_version``            : string ("v4.0" | "v3.1" | "v3.0" | "v2" | null)
-- ``cpe_vendors``             : array<string> (deduplicated, from configurations)
-- ``cpe_products``            : array<string> (deduplicated, from configurations)
-- ``cpe_versions``            : array<string> (deduplicated, from CPE 2.3 version field)
+- ``cpe_vendors``             : array<string> (deduplicated, capped from configurations)
+- ``cpe_products``            : array<string> (deduplicated, capped from configurations)
+- ``cpe_versions``            : array<string> (deduplicated, capped from CPE 2.3 version field)
 - ``reference_count``         : int
 - ``has_exploit_reference``   : boolean (any reference tagged "Exploit")
 
@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
 import sys
 from pathlib import Path
 from typing import Iterable
@@ -143,14 +144,22 @@ _CWES_EXPR = (
     ")"
 )
 
-# Flatten configurations[].nodes[].cpeMatch[].criteria -> array of CPE 2.3 strings.
+# Flatten a bounded slice of configurations[].nodes[].cpeMatch[].criteria.
+#
+# Some NVD records contain extremely large CPE match lists. Keeping every CPE
+# in a single row can exceed the local JVM heap while Spark writes Parquet.
+# Downstream jobs only need representative vendors/products, so cap the nested
+# lists before flattening instead of building a huge intermediate array.
 # CPE 2.3 format: cpe:2.3:part:vendor:product:version:update:edition:lang:sw_ed:tgt_sw:tgt_hw:other
 # Index 3 = vendor, 4 = product, 5 = version.
 _CPE_FLAT_EXPR = (
-    "flatten(transform(configurations, c ->"
-    "  flatten(transform(c.nodes, n -> n.cpeMatch.criteria))"
+    "flatten(transform(slice(configurations, 1, 20), c ->"
+    "  flatten(transform(slice(c.nodes, 1, 20), n ->"
+    "    transform(slice(n.cpeMatch, 1, 200), m -> m.criteria)"
+    "  ))"
     "))"
 )
+_CPE_ARRAY_LIMIT = 500
 
 
 def transform_nvd_year(df_raw: DataFrame, year: int) -> DataFrame:
@@ -179,9 +188,21 @@ def transform_nvd_year(df_raw: DataFrame, year: int) -> DataFrame:
                 .otherwise(lit(None).cast("string"))
                 .alias("cvss_version")
             ),
-            expr(f"array_distinct(transform({_CPE_FLAT_EXPR}, cpe -> split(cpe, ':')[3]))").alias("cpe_vendors"),
-            expr(f"array_distinct(transform({_CPE_FLAT_EXPR}, cpe -> split(cpe, ':')[4]))").alias("cpe_products"),
-            expr(f"array_distinct(transform({_CPE_FLAT_EXPR}, cpe -> split(cpe, ':')[5]))").alias("cpe_versions"),
+            expr(
+                "slice("
+                f"array_distinct(transform({_CPE_FLAT_EXPR}, cpe -> split(cpe, ':')[3])),"
+                f" 1, {_CPE_ARRAY_LIMIT})"
+            ).alias("cpe_vendors"),
+            expr(
+                "slice("
+                f"array_distinct(transform({_CPE_FLAT_EXPR}, cpe -> split(cpe, ':')[4])),"
+                f" 1, {_CPE_ARRAY_LIMIT})"
+            ).alias("cpe_products"),
+            expr(
+                "slice("
+                f"array_distinct(transform({_CPE_FLAT_EXPR}, cpe -> split(cpe, ':')[5])),"
+                f" 1, {_CPE_ARRAY_LIMIT})"
+            ).alias("cpe_versions"),
             (
                 when(col("references").isNull(), lit(0))
                 .otherwise(size(col("references")))
@@ -203,23 +224,24 @@ def transform_nvd_year(df_raw: DataFrame, year: int) -> DataFrame:
 # ---------------------------------------------------------------------------
 
 def write_year_partition(df: DataFrame, output_dir: Path, year: int) -> int:
-    """Write one year as a single partition: ``data/silver/nvd/year=YYYY/``.
+    """Write one year under ``data/silver/nvd/year=YYYY/``.
 
-    Returns the row count written. Caches the DF so the count and the
-    write share a single pass over the source JSON.
+    Returns the row count written. The DataFrame is intentionally not cached:
+    full NVD years contain wide nested fields and can exceed local JVM heap
+    when stored in Spark's in-memory cache.
     """
+    output_dir.mkdir(parents=True, exist_ok=True)
     target = output_dir / f"year={year}"
-    target.mkdir(parents=True, exist_ok=True)
+    tmp_target = output_dir / f"_tmp_year={year}"
+    if tmp_target.exists():
+        shutil.rmtree(tmp_target)
 
-    df.cache()
-    try:
-        n_rows = df.count()
-        # Coalesce to a single file: a typical year is 30-60 K rows of small
-        # records, well below any sensible Parquet split point.
-        df.coalesce(1).write.mode("overwrite").parquet(str(target))
-    finally:
-        df.unpersist(blocking=True)
+    df.write.mode("overwrite").parquet(str(tmp_target))
+    n_rows = df.sparkSession.read.parquet(str(tmp_target)).count()
 
+    if target.exists():
+        shutil.rmtree(target)
+    tmp_target.replace(target)
     return n_rows
 
 

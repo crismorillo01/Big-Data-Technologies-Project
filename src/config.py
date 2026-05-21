@@ -59,6 +59,8 @@ DATA_DIR: Path = PROJECT_ROOT / "data"
 RAW_DIR: Path = DATA_DIR / "raw"
 RAW_NVD_DIR: Path = RAW_DIR / "nvd"                         # nvdcve-2.0-YYYY.json.gz
 RAW_NVD_JSON_DIR: Path = RAW_DIR / "nvd_json"               # nvdcve-2.0-YYYY.json
+RAW_NVD_MODIFIED_DIR: Path = RAW_DIR / "nvd_modified"       # partition: snapshot_date=YYYY-MM-DD
+RAW_NVD_MODIFIED_JSON_DIR: Path = RAW_DIR / "nvd_modified_json"
 RAW_KEV_DIR: Path = RAW_DIR / "kev"
 RAW_KEV_FILE: Path = RAW_KEV_DIR / "known_exploited_vulnerabilities.csv"
 RAW_EPSS_DIR: Path = RAW_DIR / "epss"                       # epss_scores-YYYY-MM-DD.csv[.gz]
@@ -66,6 +68,7 @@ RAW_EPSS_DIR: Path = RAW_DIR / "epss"                       # epss_scores-YYYY-M
 # ---- Silver layer (clean, typed, partitioned Parquet) --------------------
 SILVER_DIR: Path = DATA_DIR / "silver"
 SILVER_NVD_DIR: Path = SILVER_DIR / "nvd"                   # partition: year=YYYY
+SILVER_NVD_UPDATES_DIR: Path = SILVER_DIR / "nvd_updates"   # partition: snapshot_date=YYYY-MM-DD
 SILVER_KEV_DIR: Path = SILVER_DIR / "kev"
 SILVER_EPSS_DIR: Path = SILVER_DIR / "epss"                 # partition: score_date=YYYY-MM-DD
 
@@ -88,8 +91,9 @@ GOLD_SIMULATION_TIMESERIES_DIR: Path = GOLD_DIR / "simulation_timeseries"
 def all_data_directories() -> tuple[Path, ...]:
     """Return every data directory the pipeline writes to."""
     return (
-        RAW_NVD_DIR, RAW_NVD_JSON_DIR, RAW_KEV_DIR, RAW_EPSS_DIR,
-        SILVER_NVD_DIR, SILVER_KEV_DIR, SILVER_EPSS_DIR,
+        RAW_NVD_DIR, RAW_NVD_JSON_DIR, RAW_NVD_MODIFIED_DIR, RAW_NVD_MODIFIED_JSON_DIR,
+        RAW_KEV_DIR, RAW_EPSS_DIR,
+        SILVER_NVD_DIR, SILVER_NVD_UPDATES_DIR, SILVER_KEV_DIR, SILVER_EPSS_DIR,
         GOLD_DIR,
     )
 
