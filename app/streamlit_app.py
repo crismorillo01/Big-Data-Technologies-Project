@@ -13,7 +13,6 @@ No direct pd.read_parquet() calls in this file.
 
 from __future__ import annotations
 
-import datetime
 import sys
 from pathlib import Path
 
@@ -55,12 +54,12 @@ def _overview_stats(snapshot_date: str) -> pd.DataFrame:
     return overview_stats(snapshot_date)
 
 @st.cache_data(ttl=300)
-def _top_vulns(n, min_priority, only_kev, vendor, snapshot_date):
-    return top_n_vulnerabilities(n, min_priority, only_kev, vendor or None, snapshot_date or None)
+def _top_vulns(n, priority_level, only_kev, vendor, snapshot_date):
+    return top_n_vulnerabilities(n, priority_level, only_kev, vendor or None, snapshot_date or None)
 
 @st.cache_data(ttl=300)
-def _cluster_overview():
-    return cluster_overview()
+def _cluster_overview(snapshot_date):
+    return cluster_overview(snapshot_date or None)
 
 @st.cache_data(ttl=300)
 def _strategy_comparison():
@@ -96,7 +95,7 @@ page = st.sidebar.radio(
 # Snapshot date selector
 snapshots = _available_snapshots()
 st.sidebar.markdown("### Snapshot date")
-date_mode = st.sidebar.radio("Select mode", ["Latest", "Choose from list", "Pick any date"])
+date_mode = st.sidebar.radio("Select mode", ["Latest", "Choose from list"])
 
 if date_mode == "Latest":
     snapshot_date = snapshots[0] if snapshots else None
@@ -108,18 +107,6 @@ elif date_mode == "Choose from list":
         format_func=lambda x: str(x)[:10],
     )
     snapshot_date = str(snapshot_date)[:10] if snapshot_date and snapshot_date != "(none)" else None
-
-else:  # Pick any date
-    picked = st.sidebar.date_input(
-        "Pick a date",
-        value=datetime.date.today(),
-        min_value=datetime.date(2015, 1, 1),
-        max_value=datetime.date.today(),
-    )
-    snapshot_date = str(picked)
-    if snapshots and snapshot_date not in snapshots:
-        st.sidebar.warning(f"No pipeline data for {snapshot_date}. Showing latest instead.")
-        snapshot_date = snapshots[0] if snapshots else None
 
 # Ensure clean YYYY-MM-DD string
 if snapshot_date:
@@ -254,11 +241,7 @@ elif page == "Vulnerability Explorer":
     with f4:
         kev_only = st.checkbox("KEV only")
 
-    min_priority = {"All": 0.0, "Critical": 0.8, "High": 0.6, "Medium": 0.4, "Low": 0.0}.get(
-        severity_filter, 0.0
-    )
-
-    df = _top_vulns(500, min_priority, kev_only, vendor_filter or None, snapshot_date)
+    df = _top_vulns(500, severity_filter, kev_only, vendor_filter or None, snapshot_date)
 
     if not df.empty and min_epss > 0 and "epss_score" in df.columns:
         df = df[df["epss_score"] >= min_epss]
@@ -309,7 +292,7 @@ elif page == "Vulnerability Explorer":
 elif page == "Cluster View":
     st.title("Cluster View")
 
-    clusters = _cluster_overview()
+    clusters = _cluster_overview(snapshot_date)
 
     if _no_data(clusters, "Cluster data not yet generated — run capacity_simulation first."):
         st.stop()

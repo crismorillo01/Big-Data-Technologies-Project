@@ -39,9 +39,6 @@ logger = logging.getLogger(__name__)
 
 NVD_MODIFIED_URL = "https://nvd.nist.gov/feeds/json/cve/2.0/nvdcve-2.0-modified.json.gz"
 
-# Only keep CVEs published from this year onwards
-MIN_NVD_YEAR = 2015
-
 
 def fetch_nvd_modified(
     snapshot_date: str,
@@ -96,26 +93,27 @@ def upsert_nvd_modified(
     modified_df: DataFrame,
     output_dir: Path = SILVER_NVD_DIR,
     snapshot_date: str | None = None,
+    min_year: int = 2015,
 ) -> dict[str, int]:
     """Upsert modified NVD rows into the silver yearly partitions.
 
     The merge key is ``cve_id``. A CVE published in an old year but modified
     today is written back to its original ``published_year`` partition.
 
-    Only CVEs with published_year >= MIN_NVD_YEAR are processed.
+    Only CVEs with published_year >= min_year are processed.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
     modified_df = (
         dedupe_modified(modified_df)
-        .filter(F.col("published_year") >= F.lit(MIN_NVD_YEAR))
+        .filter(F.col("published_year") >= F.lit(min_year))
     )
 
     total_modified = modified_df.count()
     if total_modified == 0:
         return {"modified_rows": 0, "affected_years": 0, "written_rows": 0}
 
-    affected_years = [
+    modified_years = [
         int(row["published_year"])
         for row in (
             modified_df
@@ -125,6 +123,25 @@ def upsert_nvd_modified(
             .collect()
         )
     ]
+    modified_ids = modified_df.select("cve_id").distinct()
+
+    existing_years: list[int] = []
+    if output_dir.exists() and any(output_dir.rglob("*.parquet")):
+        existing_all = spark.read.parquet(str(output_dir))
+        if "year" in existing_all.columns:
+            existing_years = [
+                int(row["year"])
+                for row in (
+                    existing_all
+                    .join(modified_ids, on="cve_id", how="inner")
+                    .filter(F.col("year").isNotNull())
+                    .select("year")
+                    .distinct()
+                    .collect()
+                )
+            ]
+
+    affected_years = sorted(set(modified_years) | set(existing_years))
 
     written_rows = 0
     suffix = snapshot_date or "latest"
@@ -139,7 +156,6 @@ def upsert_nvd_modified(
 
         modified_year = modified_df.filter(
             F.col("published_year") == F.lit(year))
-        modified_ids = modified_year.select("cve_id").distinct()
 
         if target.exists() and any(target.glob("*.parquet")):
             existing_year = spark.read.parquet(str(target))
@@ -180,6 +196,7 @@ def run_nvd_modified_ingestion(
     updates_dir: Path = SILVER_NVD_UPDATES_DIR,
     output_dir: Path = SILVER_NVD_DIR,
     force_download: bool = True,
+    min_year: int = 2015,
 ) -> dict[str, int]:
     """Download, store and upsert the NVD modified feed."""
     logger.info(
@@ -209,6 +226,7 @@ def run_nvd_modified_ingestion(
         modified_updates,
         output_dir=output_dir,
         snapshot_date=snapshot_date,
+        min_year=min_year,
     )
 
     logger.info(
@@ -238,6 +256,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--updates-dir", type=Path,
                         default=SILVER_NVD_UPDATES_DIR)
     parser.add_argument("--output-dir", type=Path, default=SILVER_NVD_DIR)
+    parser.add_argument(
+        "--min-year",
+        type=int,
+        default=2015,
+        help="Ignore modified CVEs published before this year. Default: 2015.",
+    )
 
     parser.add_argument(
         "--no-force-download",
@@ -273,6 +297,7 @@ def main() -> None:
             updates_dir=args.updates_dir,
             output_dir=args.output_dir,
             force_download=not args.no_force_download,
+            min_year=args.min_year,
         )
     finally:
         spark.stop()

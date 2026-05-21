@@ -16,6 +16,8 @@ def test_daily_pipeline_uses_nvd_modified_by_default():
     assert steps[0].name == "ingest_nvd_modified"
     assert steps[0].script == "src/ingestion/ingest_nvd_modified.py"
     assert "--snapshot-date" in steps[0].args
+    assert "--min-year" in steps[0].args
+    assert "2025" in steps[0].args
 
 
 def test_daily_pipeline_can_force_full_nvd_refresh():

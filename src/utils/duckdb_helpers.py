@@ -125,7 +125,7 @@ def overview_stats(snapshot_date: str | None = None) -> pd.DataFrame:
 
 def top_n_vulnerabilities(
     n: int = 50,
-    min_priority: float = 0.0,
+    priority_level: str | None = None,
     only_kev: bool = False,
     vendor: str | None = None,
     snapshot_date: str | None = None,
@@ -138,20 +138,23 @@ def top_n_vulnerabilities(
     partition = GOLD_VULN_SCORES_FINAL_DIR / f"snapshot_date={actual}"
     glob = str(partition / "*.parquet")
 
-    conditions = ["priority_score_final >= ?"]
-    params: list[Any] = [min_priority]
+    conditions: list[str] = []
+    params: list[Any] = []
 
+    if priority_level and priority_level != "All":
+        conditions.append("priority_level_final = ?")
+        params.append(priority_level)
     if only_kev:
         conditions.append("is_kev = 1")
     if vendor:
         conditions.append("primary_vendor ILIKE ?")
         params.append(f"%{vendor}%")
 
-    where_clause = " AND ".join(conditions)
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     sql = f"""
         SELECT *
         FROM read_parquet('{glob}', union_by_name=true)
-        WHERE {where_clause}
+        {where_clause}
         ORDER BY priority_score_final DESC
         LIMIT {int(n)}
     """
@@ -162,8 +165,12 @@ def top_n_vulnerabilities(
 # Cluster overview
 # ---------------------------------------------------------------------------
 
-def cluster_overview() -> pd.DataFrame:
-    """Return cluster risk summary, optionally joined with topics."""
+def cluster_overview(snapshot_date: str | None = None) -> pd.DataFrame:
+    """Return cluster risk summary for one snapshot, optionally joined with topics."""
+    actual = _resolve_snapshot(GOLD_CLUSTER_RISK_SUMMARY_DIR, snapshot_date)
+    if not actual:
+        return pd.DataFrame()
+
     risk_glob = _glob(GOLD_CLUSTER_RISK_SUMMARY_DIR)
 
     # Try joining with topics if available
@@ -174,12 +181,14 @@ def cluster_overview() -> pd.DataFrame:
                    t.top_keywords,
                    t.top_vendors AS topic_vendors,
                    t.top_cwes
-            FROM read_parquet('{risk_glob}', union_by_name=true) r
-            LEFT JOIN read_parquet('{topics_glob}', union_by_name=true) t
+            FROM read_parquet('{risk_glob}', hive_partitioning=true, union_by_name=true) r
+            LEFT JOIN read_parquet('{topics_glob}', hive_partitioning=true, union_by_name=true) t
                 ON r.cluster_id = t.cluster_id
+               AND CAST(r.snapshot_date AS VARCHAR) = CAST(t.snapshot_date AS VARCHAR)
+            WHERE CAST(r.snapshot_date AS VARCHAR) LIKE ?
             ORDER BY r.kev_density DESC, r.cluster_size DESC
         """
-        df = query_parquet(sql)
+        df = query_parquet(sql, [f"{actual}%"])
         if not df.empty:
             return df
     except Exception:
@@ -188,11 +197,12 @@ def cluster_overview() -> pd.DataFrame:
     # Fallback: just risk summary
     sql = f"""
         SELECT *
-        FROM read_parquet('{risk_glob}', union_by_name=true)
-        WHERE cluster_size > 0
+        FROM read_parquet('{risk_glob}', hive_partitioning=true, union_by_name=true)
+        WHERE CAST(snapshot_date AS VARCHAR) LIKE ?
+          AND cluster_size > 0
         ORDER BY kev_density DESC, cluster_size DESC
     """
-    return query_parquet(sql)
+    return query_parquet(sql, [f"{actual}%"])
 
 
 # ---------------------------------------------------------------------------

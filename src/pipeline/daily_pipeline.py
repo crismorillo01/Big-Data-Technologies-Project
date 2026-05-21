@@ -87,6 +87,7 @@ def build_steps(
     """Build the ordered list of pipeline steps."""
     common_driver = ("--driver-memory", driver_memory)
     common_snapshot = ("--snapshot-date", snapshot_date)
+    min_nvd_year = min(nvd_years)
     use_full_nvd_refresh = full_nvd_refresh or not (
         has_existing_nvd_silver() if has_nvd_base is None else has_nvd_base
     )
@@ -105,7 +106,7 @@ def build_steps(
             Step(
                 name="ingest_nvd_modified",
                 script="src/ingestion/ingest_nvd_modified.py",
-                args=common_driver + common_snapshot,
+                args=common_driver + common_snapshot + ("--min-year", str(min_nvd_year)),
                 owner="A",
             )
         ]

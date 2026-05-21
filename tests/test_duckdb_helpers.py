@@ -1,0 +1,145 @@
+"""Tests for Streamlit DuckDB helper queries."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from src.utils import duckdb_helpers
+
+
+pytest.importorskip("pyarrow")
+
+
+def _write_snapshot(base_dir: Path, snapshot_date: str, rows: list[dict]) -> None:
+    partition = base_dir / f"snapshot_date={snapshot_date}"
+    partition.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_parquet(partition / "part-00000.parquet", index=False)
+
+
+def test_cluster_overview_filters_snapshot_before_joining_topics(monkeypatch, tmp_path):
+    risk_dir = tmp_path / "cluster_risk_summary"
+    topics_dir = tmp_path / "cluster_topics"
+
+    _write_snapshot(
+        risk_dir,
+        "2026-05-19",
+        [
+            {
+                "cluster_id": 0,
+                "cluster_size": 10,
+                "kev_density": 0.1,
+                "n_kev": 1,
+                "avg_priority_final": 0.4,
+                "avg_cvss": 6.0,
+                "avg_epss": 0.1,
+                "max_epss": 0.2,
+            },
+            {
+                "cluster_id": 1,
+                "cluster_size": 20,
+                "kev_density": 0.2,
+                "n_kev": 4,
+                "avg_priority_final": 0.5,
+                "avg_cvss": 7.0,
+                "avg_epss": 0.2,
+                "max_epss": 0.3,
+            },
+        ],
+    )
+    _write_snapshot(
+        risk_dir,
+        "2026-05-20",
+        [
+            {
+                "cluster_id": 0,
+                "cluster_size": 30,
+                "kev_density": 0.3,
+                "n_kev": 9,
+                "avg_priority_final": 0.6,
+                "avg_cvss": 8.0,
+                "avg_epss": 0.3,
+                "max_epss": 0.4,
+            },
+            {
+                "cluster_id": 1,
+                "cluster_size": 40,
+                "kev_density": 0.4,
+                "n_kev": 16,
+                "avg_priority_final": 0.7,
+                "avg_cvss": 9.0,
+                "avg_epss": 0.4,
+                "max_epss": 0.5,
+            },
+        ],
+    )
+    _write_snapshot(
+        topics_dir,
+        "2026-05-19",
+        [
+            {"cluster_id": 0, "top_keywords": "old-zero", "top_vendors": "old", "top_cwes": "CWE-1"},
+            {"cluster_id": 1, "top_keywords": "old-one", "top_vendors": "old", "top_cwes": "CWE-2"},
+        ],
+    )
+    _write_snapshot(
+        topics_dir,
+        "2026-05-20",
+        [
+            {"cluster_id": 0, "top_keywords": "new-zero", "top_vendors": "new", "top_cwes": "CWE-3"},
+            {"cluster_id": 1, "top_keywords": "new-one", "top_vendors": "new", "top_cwes": "CWE-4"},
+        ],
+    )
+
+    monkeypatch.setattr(duckdb_helpers, "GOLD_CLUSTER_RISK_SUMMARY_DIR", risk_dir)
+    monkeypatch.setattr(duckdb_helpers, "GOLD_CLUSTER_TOPICS_DIR", topics_dir)
+
+    result = duckdb_helpers.cluster_overview("2026-05-20")
+
+    assert len(result) == 2
+    assert set(result["cluster_id"]) == {0, 1}
+    assert set(result["top_keywords"]) == {"new-zero", "new-one"}
+    assert set(result["cluster_size"]) == {30, 40}
+
+
+def test_top_n_vulnerabilities_filters_exact_priority_level(monkeypatch, tmp_path):
+    scored_dir = tmp_path / "vulnerability_scores_final"
+    _write_snapshot(
+        scored_dir,
+        "2026-05-20",
+        [
+            {
+                "cve_id": "CVE-1",
+                "priority_score_final": 0.95,
+                "priority_level_final": "Critical",
+                "is_kev": 0,
+                "primary_vendor": "acme",
+            },
+            {
+                "cve_id": "CVE-2",
+                "priority_score_final": 0.75,
+                "priority_level_final": "High",
+                "is_kev": 0,
+                "primary_vendor": "acme",
+            },
+            {
+                "cve_id": "CVE-3",
+                "priority_score_final": 0.45,
+                "priority_level_final": "Medium",
+                "is_kev": 0,
+                "primary_vendor": "acme",
+            },
+        ],
+    )
+
+    monkeypatch.setattr(duckdb_helpers, "GOLD_VULN_SCORES_FINAL_DIR", scored_dir)
+
+    result = duckdb_helpers.top_n_vulnerabilities(
+        n=10,
+        priority_level="High",
+        snapshot_date="2026-05-20",
+    )
+
+    assert result["cve_id"].tolist() == ["CVE-2"]
+    assert result["priority_level_final"].tolist() == ["High"]
