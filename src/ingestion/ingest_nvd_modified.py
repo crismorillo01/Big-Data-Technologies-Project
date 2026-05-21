@@ -1,9 +1,11 @@
-"""NVD modified-feed ingestion with Parquet upsert into silver NVD.
+"""NVD modified-feed ingestion with Delta upsert into silver NVD.
 
 Daily runs should not re-download and re-parse every yearly NVD feed.
 Instead, this job downloads ``nvdcve-2.0-modified.json.gz``, transforms the
 changed CVEs with the same schema as the full NVD ingestion, stores that
-incremental snapshot, and updates ``data/silver/nvd/year=YYYY`` by ``cve_id``.
+incremental snapshot in Parquet for lineage, and upserts the canonical
+``data/silver/nvd_delta`` table by ``cve_id``. A legacy Parquet-only
+upsert is still available with ``--nvd-storage parquet``.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 from src.config import (  # noqa: E402
     RAW_NVD_MODIFIED_DIR,
     RAW_NVD_MODIFIED_JSON_DIR,
+    SILVER_NVD_DELTA_DIR,
     SILVER_NVD_DIR,
     SILVER_NVD_UPDATES_DIR,
     configure_logging,
@@ -38,6 +41,8 @@ from src.utils.http import download_file, gunzip_file  # noqa: E402
 logger = logging.getLogger(__name__)
 
 NVD_MODIFIED_URL = "https://nvd.nist.gov/feeds/json/cve/2.0/nvdcve-2.0-modified.json.gz"
+NVD_STORAGE_PARQUET = "parquet"
+NVD_STORAGE_DELTA = "delta"
 
 
 def fetch_nvd_modified(
@@ -86,6 +91,59 @@ def _replace_directory(tmp_target: Path, final_target: Path) -> None:
     if final_target.exists():
         shutil.rmtree(final_target)
     tmp_target.replace(final_target)
+
+
+def _delta_table_exists(delta_dir: Path) -> bool:
+    return (delta_dir / "_delta_log").exists()
+
+
+def _load_delta_table(delta_dir: Path):
+    try:
+        from delta.tables import DeltaTable
+    except ImportError as exc:
+        raise RuntimeError(
+            "Delta Lake support requires delta-spark. Install project requirements first."
+        ) from exc
+
+    return DeltaTable.forPath
+
+
+def bootstrap_nvd_delta_from_parquet(
+    spark: SparkSession,
+    parquet_dir: Path = SILVER_NVD_DIR,
+    delta_dir: Path = SILVER_NVD_DELTA_DIR,
+    min_year: int = 2015,
+) -> int:
+    """Create the Delta silver table once from an existing legacy Parquet base."""
+    if not parquet_dir.exists() or not any(parquet_dir.rglob("*.parquet")):
+        raise FileNotFoundError(
+            f"Cannot bootstrap Delta NVD because no Parquet base exists at {parquet_dir}"
+        )
+
+    delta_dir.parent.mkdir(parents=True, exist_ok=True)
+    tmp_delta = delta_dir.parent / f"_tmp_{delta_dir.name}"
+
+    if tmp_delta.exists():
+        shutil.rmtree(tmp_delta)
+
+    df = (
+        spark.read.parquet(str(parquet_dir))
+        .drop("year")
+        .filter(F.col("published_year") >= F.lit(min_year))
+    )
+    n_rows = df.count()
+
+    (
+        df.write
+        .format("delta")
+        .mode("overwrite")
+        .partitionBy("published_year")
+        .save(str(tmp_delta))
+    )
+
+    _replace_directory(tmp_delta, delta_dir)
+    logger.info("Bootstrapped Delta NVD table at %s with %d rows", delta_dir, n_rows)
+    return int(n_rows)
 
 
 def upsert_nvd_modified(
@@ -188,6 +246,71 @@ def upsert_nvd_modified(
     }
 
 
+def upsert_nvd_modified_delta(
+    spark: SparkSession,
+    modified_df: DataFrame,
+    delta_dir: Path = SILVER_NVD_DELTA_DIR,
+    bootstrap_parquet_dir: Path = SILVER_NVD_DIR,
+    snapshot_date: str | None = None,
+    min_year: int = 2015,
+) -> dict[str, int]:
+    """Upsert modified NVD rows into the Delta silver table."""
+    modified_df = (
+        dedupe_modified(modified_df)
+        .drop("year")
+        .filter(F.col("published_year") >= F.lit(min_year))
+    )
+
+    total_modified = modified_df.count()
+    if total_modified == 0:
+        return {"modified_rows": 0, "affected_years": 0, "written_rows": 0}
+
+    if not _delta_table_exists(delta_dir):
+        bootstrap_nvd_delta_from_parquet(
+            spark,
+            parquet_dir=bootstrap_parquet_dir,
+            delta_dir=delta_dir,
+            min_year=min_year,
+        )
+
+    delta_table_for_path = _load_delta_table(delta_dir)
+    delta_table = delta_table_for_path(spark, str(delta_dir))
+
+    affected_years = [
+        int(row["published_year"])
+        for row in (
+            modified_df
+            .filter(F.col("published_year").isNotNull())
+            .select("published_year")
+            .distinct()
+            .collect()
+        )
+    ]
+
+    (
+        delta_table.alias("target")
+        .merge(
+            modified_df.alias("source"),
+            "target.cve_id = source.cve_id",
+        )
+        .whenMatchedUpdateAll()
+        .whenNotMatchedInsertAll()
+        .execute()
+    )
+
+    written_rows = (
+        spark.read.format("delta").load(str(delta_dir))
+        .filter(F.col("published_year") >= F.lit(min_year))
+        .count()
+    )
+
+    return {
+        "modified_rows": int(total_modified),
+        "affected_years": len(set(affected_years)),
+        "written_rows": int(written_rows),
+    }
+
+
 def run_nvd_modified_ingestion(
     spark: SparkSession,
     snapshot_date: str,
@@ -195,6 +318,8 @@ def run_nvd_modified_ingestion(
     json_dir: Path = RAW_NVD_MODIFIED_JSON_DIR,
     updates_dir: Path = SILVER_NVD_UPDATES_DIR,
     output_dir: Path = SILVER_NVD_DIR,
+    delta_output_dir: Path = SILVER_NVD_DELTA_DIR,
+    nvd_storage: str = NVD_STORAGE_DELTA,
     force_download: bool = True,
     min_year: int = 2015,
 ) -> dict[str, int]:
@@ -221,13 +346,23 @@ def run_nvd_modified_ingestion(
 
     modified_updates = spark.read.parquet(str(updates_path))
 
-    stats = upsert_nvd_modified(
-        spark,
-        modified_updates,
-        output_dir=output_dir,
-        snapshot_date=snapshot_date,
-        min_year=min_year,
-    )
+    if nvd_storage == NVD_STORAGE_DELTA:
+        stats = upsert_nvd_modified_delta(
+            spark,
+            modified_updates,
+            delta_dir=delta_output_dir,
+            bootstrap_parquet_dir=output_dir,
+            snapshot_date=snapshot_date,
+            min_year=min_year,
+        )
+    else:
+        stats = upsert_nvd_modified(
+            spark,
+            modified_updates,
+            output_dir=output_dir,
+            snapshot_date=snapshot_date,
+            min_year=min_year,
+        )
 
     logger.info(
         "NVD modified ingestion complete: modified_rows=%d affected_years=%d written_rows=%d",
@@ -256,6 +391,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--updates-dir", type=Path,
                         default=SILVER_NVD_UPDATES_DIR)
     parser.add_argument("--output-dir", type=Path, default=SILVER_NVD_DIR)
+    parser.add_argument("--delta-output-dir", type=Path,
+                        default=SILVER_NVD_DELTA_DIR)
+    parser.add_argument(
+        "--nvd-storage",
+        choices=[NVD_STORAGE_PARQUET, NVD_STORAGE_DELTA],
+        default=NVD_STORAGE_DELTA,
+        help="Silver NVD storage engine. Default: delta. Use parquet for legacy Parquet-only mode.",
+    )
     parser.add_argument(
         "--min-year",
         type=int,
@@ -286,6 +429,7 @@ def main() -> None:
     spark = create_spark_session(
         "nvd-modified-ingestion",
         driver_memory=args.driver_memory,
+        enable_delta=args.nvd_storage == NVD_STORAGE_DELTA,
     )
 
     try:
@@ -296,6 +440,8 @@ def main() -> None:
             json_dir=args.json_dir,
             updates_dir=args.updates_dir,
             output_dir=args.output_dir,
+            delta_output_dir=args.delta_output_dir,
+            nvd_storage=args.nvd_storage,
             force_download=not args.no_force_download,
             min_year=args.min_year,
         )

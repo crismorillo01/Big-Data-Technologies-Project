@@ -5,6 +5,7 @@
 
 # ---- Core compute ----------------------------------------------------------
 pyspark==3.5.1
+delta-spark==3.1.0             # optional Delta Lake support for silver NVD
 pandas==2.2.2
 numpy==1.26.4
 pyarrow==15.0.2

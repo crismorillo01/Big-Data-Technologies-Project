@@ -1,8 +1,9 @@
 ﻿"""NVD ingestion job — year-by-year processing into the silver layer.
 
 This job downloads the NVD 2.0 yearly JSON feeds, extracts the fields
-the rest of the pipeline needs, and writes one Parquet partition per
-year under ``data/silver/nvd/year=YYYY/``.
+the rest of the pipeline needs, and writes the canonical NVD silver
+table to Delta Lake under ``data/silver/nvd_delta`` by default. A
+legacy Parquet-only mode is still available with ``--nvd-storage parquet``.
 
 Why year-by-year
 ----------------
@@ -31,7 +32,8 @@ Output silver schema
 - ``reference_count``         : int
 - ``has_exploit_reference``   : boolean (any reference tagged "Exploit")
 
-Partitioned by: ``year`` (= the feed year, in the path).
+Delta partitioned by: ``published_year``.
+Legacy Parquet partitioned by: ``year`` (= the feed year, in the path).
 """
 
 from __future__ import annotations
@@ -67,6 +69,7 @@ from src.config import (  # noqa: E402  (after sys.path tweak)
     DEFAULT_NVD_YEARS,
     RAW_NVD_DIR,
     RAW_NVD_JSON_DIR,
+    SILVER_NVD_DELTA_DIR,
     SILVER_NVD_DIR,
     configure_logging,
     create_spark_session,
@@ -77,6 +80,8 @@ from src.utils.http import download_file, gunzip_file  # noqa: E402
 logger = logging.getLogger(__name__)
 
 NVD_BASE_URL = "https://nvd.nist.gov/feeds/json/cve/2.0"
+NVD_STORAGE_PARQUET = "parquet"
+NVD_STORAGE_DELTA = "delta"
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +250,63 @@ def write_year_partition(df: DataFrame, output_dir: Path, year: int) -> int:
     return n_rows
 
 
+def _delta_table_exists(delta_dir: Path) -> bool:
+    return (delta_dir / "_delta_log").exists()
+
+
+def _load_delta_table(delta_dir: Path):
+    try:
+        from delta.tables import DeltaTable
+    except ImportError as exc:
+        raise RuntimeError(
+            "Delta Lake support requires delta-spark. Install project requirements first."
+        ) from exc
+
+    return DeltaTable.forPath
+
+
+def write_year_delta(
+    df: DataFrame,
+    delta_dir: Path,
+    year: int,
+    replace_delta_table: bool = False,
+) -> int:
+    """Write one full NVD year into the experimental Delta silver table."""
+    delta_dir.parent.mkdir(parents=True, exist_ok=True)
+    df_delta = df.drop("year")
+    n_rows = df_delta.count()
+
+    if replace_delta_table and delta_dir.exists():
+        shutil.rmtree(delta_dir)
+
+    if not _delta_table_exists(delta_dir):
+        (
+            df_delta.write
+            .format("delta")
+            .mode("overwrite")
+            .partitionBy("published_year")
+            .save(str(delta_dir))
+        )
+        return int(n_rows)
+
+    delta_table_for_path = _load_delta_table(delta_dir)
+    delta_table = delta_table_for_path(df.sparkSession, str(delta_dir))
+
+    (
+        delta_table.alias("target")
+        .merge(
+            df_delta.alias("source"),
+            "target.cve_id = source.cve_id",
+        )
+        .whenMatchedUpdateAll()
+        .whenNotMatchedInsertAll()
+        .execute()
+    )
+
+    logger.info("[year %d] merged %d rows into Delta NVD table", year, n_rows)
+    return int(n_rows)
+
+
 # ---------------------------------------------------------------------------
 # Job entry
 # ---------------------------------------------------------------------------
@@ -255,15 +317,22 @@ def run_nvd_ingestion(
     raw_dir: Path = RAW_NVD_DIR,
     json_dir: Path = RAW_NVD_JSON_DIR,
     output_dir: Path = SILVER_NVD_DIR,
+    delta_output_dir: Path = SILVER_NVD_DELTA_DIR,
+    nvd_storage: str = NVD_STORAGE_DELTA,
+    replace_delta_table: bool = False,
     force_download: bool = False,
 ) -> int:
     """Run the year-by-year NVD ingestion. Returns total rows written."""
     raw_dir.mkdir(parents=True, exist_ok=True)
     json_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if nvd_storage == NVD_STORAGE_DELTA:
+        delta_output_dir.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     years_list = list(years)
     logger.info("NVD ingestion starting for years: %s", years_list)
+    logger.info("NVD silver storage mode: %s", nvd_storage)
 
     total_rows = 0
     for year in years_list:
@@ -275,7 +344,15 @@ def run_nvd_ingestion(
         df_silver = transform_nvd_year(df_raw, year)
 
         logger.info("[year %d] writing silver partition", year)
-        n_rows = write_year_partition(df_silver, output_dir, year)
+        if nvd_storage == NVD_STORAGE_DELTA:
+            n_rows = write_year_delta(
+                df_silver,
+                delta_output_dir,
+                year,
+                replace_delta_table=replace_delta_table and year == years_list[0],
+            )
+        else:
+            n_rows = write_year_partition(df_silver, output_dir, year)
         total_rows += n_rows
         logger.info("[year %d] done (%d rows)", year, n_rows)
 
@@ -299,6 +376,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--raw-dir", type=Path, default=RAW_NVD_DIR)
     parser.add_argument("--json-dir", type=Path, default=RAW_NVD_JSON_DIR)
     parser.add_argument("--output-dir", type=Path, default=SILVER_NVD_DIR)
+    parser.add_argument("--delta-output-dir", type=Path,
+                        default=SILVER_NVD_DELTA_DIR)
+    parser.add_argument(
+        "--nvd-storage",
+        choices=[NVD_STORAGE_PARQUET, NVD_STORAGE_DELTA],
+        default=NVD_STORAGE_DELTA,
+        help="Silver NVD storage engine. Default: delta. Use parquet for legacy Parquet-only mode.",
+    )
+    parser.add_argument(
+        "--replace-delta-table",
+        action="store_true",
+        help="Drop and recreate the Delta NVD table before writing the first requested year.",
+    )
     parser.add_argument(
         "--force-download",
         action="store_true",
@@ -320,6 +410,7 @@ def main() -> None:
     spark = create_spark_session(
         app_name="nvd-ingestion",
         driver_memory=args.driver_memory,
+        enable_delta=args.nvd_storage == NVD_STORAGE_DELTA,
     )
     try:
         run_nvd_ingestion(
@@ -328,6 +419,9 @@ def main() -> None:
             raw_dir=args.raw_dir,
             json_dir=args.json_dir,
             output_dir=args.output_dir,
+            delta_output_dir=args.delta_output_dir,
+            nvd_storage=args.nvd_storage,
+            replace_delta_table=args.replace_delta_table,
             force_download=args.force_download,
         )
     finally:

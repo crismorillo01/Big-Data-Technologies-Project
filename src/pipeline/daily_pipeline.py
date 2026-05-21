@@ -44,6 +44,7 @@ from src.config import (  # noqa: E402
     DEFAULT_DAILY_CAPACITY,
     DEFAULT_NVD_YEARS,
     DEFAULT_SIMULATION_DAYS,
+    SILVER_NVD_DELTA_DIR,
     SILVER_NVD_DIR,
     configure_logging,
     get_snapshot_date,
@@ -51,6 +52,13 @@ from src.config import (  # noqa: E402
 
 
 logger = logging.getLogger(__name__)
+
+DELTA_SPARK_PACKAGE = "io.delta:delta-spark_2.12:3.1.0"
+DELTA_SPARK_SUBMIT_ARGS = (
+    "--packages", DELTA_SPARK_PACKAGE,
+    "--conf", "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension",
+    "--conf", "spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -70,9 +78,21 @@ class Step:
         return _PROJECT_ROOT / self.script
 
 
-def has_existing_nvd_silver(silver_nvd_dir: Path = SILVER_NVD_DIR) -> bool:
-    """Return True when the full NVD silver base already exists."""
-    return silver_nvd_dir.exists() and any(silver_nvd_dir.rglob("*.parquet"))
+def has_existing_nvd_silver(
+    nvd_storage: str = "delta",
+    silver_nvd_dir: Path = SILVER_NVD_DIR,
+    silver_nvd_delta_dir: Path = SILVER_NVD_DELTA_DIR,
+) -> bool:
+    """Return True when a usable NVD silver base exists for the selected storage."""
+    parquet_exists = silver_nvd_dir.exists() and any(silver_nvd_dir.rglob("*.parquet"))
+    delta_exists = (silver_nvd_delta_dir / "_delta_log").exists()
+
+    if nvd_storage == "delta":
+        # A legacy Parquet base is still usable because the modified job can
+        # bootstrap the Delta table from it once.
+        return delta_exists or parquet_exists
+
+    return parquet_exists
 
 
 def build_steps(
@@ -83,30 +103,39 @@ def build_steps(
     snapshot_date: str,
     full_nvd_refresh: bool = False,
     has_nvd_base: bool | None = None,
+    nvd_storage: str = "delta",
 ) -> list[Step]:
     """Build the ordered list of pipeline steps."""
     common_driver = ("--driver-memory", driver_memory)
     common_snapshot = ("--snapshot-date", snapshot_date)
     min_nvd_year = min(nvd_years)
     use_full_nvd_refresh = full_nvd_refresh or not (
-        has_existing_nvd_silver() if has_nvd_base is None else has_nvd_base
+        has_existing_nvd_silver(nvd_storage=nvd_storage) if has_nvd_base is None else has_nvd_base
     )
     nvd_steps = (
         [
             Step(
                 name=f"ingest_nvd_{year}",
                 script="src/ingestion/ingest_nvd.py",
-                args=common_driver + ("--force-download", "--years", str(year)),
+                args=common_driver + (
+                    "--force-download",
+                    "--years", str(year),
+                    "--nvd-storage", nvd_storage,
+                    *(("--replace-delta-table",) if nvd_storage == "delta" and index == 0 else ()),
+                ),
                 owner="A",
             )
-            for year in nvd_years
+            for index, year in enumerate(nvd_years)
         ]
         if use_full_nvd_refresh
         else [
             Step(
                 name="ingest_nvd_modified",
                 script="src/ingestion/ingest_nvd_modified.py",
-                args=common_driver + common_snapshot + ("--min-year", str(min_nvd_year)),
+                args=common_driver + common_snapshot + (
+                    "--min-year", str(min_nvd_year),
+                    "--nvd-storage", nvd_storage,
+                ),
                 owner="A",
             )
         ]
@@ -128,7 +157,7 @@ def build_steps(
         Step(
             name="join_master",
             script="src/processing/join_master.py",
-            args=common_driver + common_snapshot,
+            args=common_driver + common_snapshot + ("--nvd-storage", nvd_storage),
             owner="A",
         ),
         Step(
@@ -208,6 +237,17 @@ def _find_spark_submit() -> str:
     )
 
 
+def _step_uses_delta(step: Step) -> bool:
+    """Return True when the step requests Delta-backed NVD storage."""
+    return "--nvd-storage" in step.args and "delta" in step.args
+
+
+def build_spark_submit_command(step: Step, spark_submit: str) -> list[str]:
+    """Build the spark-submit command for one step."""
+    spark_submit_args = DELTA_SPARK_SUBMIT_ARGS if _step_uses_delta(step) else ()
+    return [spark_submit, *spark_submit_args, str(step.script_path), *step.args]
+
+
 def run_step(step: Step) -> bool:
     """Run one step. Returns True on success, False on script-not-found."""
     if not step.script_path.exists():
@@ -219,7 +259,7 @@ def run_step(step: Step) -> bool:
 
     logger.info("=== Step: %s (owner %s) ===", step.name, step.owner or "?")
     spark_submit = _find_spark_submit()
-    cmd = [spark_submit, str(step.script_path), *step.args]
+    cmd = build_spark_submit_command(step, spark_submit)
     logger.info("  command: %s", " ".join(cmd))
 
     # Pass PYSPARK_PYTHON so the JVM spawns workers from the active venv,
@@ -295,6 +335,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Re-download every yearly NVD feed instead of using the daily modified feed.",
     )
+    parser.add_argument(
+        "--nvd-storage",
+        choices=["parquet", "delta"],
+        default="delta",
+        help="Storage engine for NVD silver. Default: delta. Use parquet for legacy Parquet-only mode.",
+    )
     return parser.parse_args()
 
 
@@ -310,6 +356,7 @@ def main() -> None:
         driver_memory=args.driver_memory,
         snapshot_date=args.snapshot_date,
         full_nvd_refresh=args.full_nvd_refresh,
+        nvd_storage=args.nvd_storage,
     )
 
     logger.info("Vulnerability intelligence pipeline starting")
@@ -318,7 +365,8 @@ def main() -> None:
     logger.info("  driver_memory=%s", args.driver_memory)
     logger.info("  snapshot_date=%s", args.snapshot_date)
     logger.info("  full_nvd_refresh=%s", args.full_nvd_refresh)
-    logger.info("  nvd_silver_base_exists=%s", has_existing_nvd_silver())
+    logger.info("  nvd_storage=%s", args.nvd_storage)
+    logger.info("  nvd_silver_base_exists=%s", has_existing_nvd_silver(nvd_storage=args.nvd_storage))
 
     run_pipeline(steps)
 

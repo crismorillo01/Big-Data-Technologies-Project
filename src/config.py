@@ -68,6 +68,7 @@ RAW_EPSS_DIR: Path = RAW_DIR / "epss"                       # epss_scores-YYYY-M
 # ---- Silver layer (clean, typed, partitioned Parquet) --------------------
 SILVER_DIR: Path = DATA_DIR / "silver"
 SILVER_NVD_DIR: Path = SILVER_DIR / "nvd"                   # partition: year=YYYY
+SILVER_NVD_DELTA_DIR: Path = SILVER_DIR / "nvd_delta"       # experimental Delta table
 SILVER_NVD_UPDATES_DIR: Path = SILVER_DIR / "nvd_updates"   # partition: snapshot_date=YYYY-MM-DD
 SILVER_KEV_DIR: Path = SILVER_DIR / "kev"
 SILVER_EPSS_DIR: Path = SILVER_DIR / "epss"                 # partition: score_date=YYYY-MM-DD
@@ -93,7 +94,7 @@ def all_data_directories() -> tuple[Path, ...]:
     return (
         RAW_NVD_DIR, RAW_NVD_JSON_DIR, RAW_NVD_MODIFIED_DIR, RAW_NVD_MODIFIED_JSON_DIR,
         RAW_KEV_DIR, RAW_EPSS_DIR,
-        SILVER_NVD_DIR, SILVER_NVD_UPDATES_DIR, SILVER_KEV_DIR, SILVER_EPSS_DIR,
+        SILVER_NVD_DELTA_DIR, SILVER_NVD_UPDATES_DIR, SILVER_KEV_DIR, SILVER_EPSS_DIR,
         GOLD_DIR,
     )
 
@@ -149,6 +150,7 @@ def create_spark_session(
     driver_memory: str = "3g",
     shuffle_partitions: int = 8,
     extra_config: dict[str, str] | None = None,
+    enable_delta: bool = False,
 ) -> SparkSession:
     """Build a Spark session tuned for a single-node 8 GB RAM laptop.
 
@@ -168,6 +170,8 @@ def create_spark_session(
         massive task overhead.
     extra_config :
         Optional ad-hoc Spark configs that override defaults set here.
+    enable_delta :
+        When True, configure Delta Lake extensions. Requires ``delta-spark``.
 
     Notes
     -----
@@ -195,6 +199,20 @@ def create_spark_session(
         # without losing real warnings.
         .config("spark.hadoop.io.native.lib.available", "false")
     )
+
+    if enable_delta:
+        try:
+            from delta import configure_spark_with_delta_pip
+        except ImportError as exc:
+            raise RuntimeError(
+                "Delta Lake support requires delta-spark. Install project requirements first."
+            ) from exc
+
+        builder = configure_spark_with_delta_pip(
+            builder
+            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+            .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+        )
 
     if extra_config:
         for key, value in extra_config.items():

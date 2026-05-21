@@ -82,6 +82,7 @@ from src.config import (  # noqa: E402
     GOLD_MASTER_DIR,
     SILVER_EPSS_DIR,
     SILVER_KEV_DIR,
+    SILVER_NVD_DELTA_DIR,
     SILVER_NVD_DIR,
     configure_logging,
     create_spark_session,
@@ -91,14 +92,26 @@ from src.config import (  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+NVD_STORAGE_PARQUET = "parquet"
+NVD_STORAGE_DELTA = "delta"
+
 
 # ---------------------------------------------------------------------------
 # Loaders
 # ---------------------------------------------------------------------------
 
-def load_nvd(spark: SparkSession, silver_nvd_dir: Path) -> DataFrame:
+def load_nvd(
+    spark: SparkSession,
+    silver_nvd_dir: Path,
+    silver_nvd_delta_dir: Path = SILVER_NVD_DELTA_DIR,
+    nvd_storage: str = NVD_STORAGE_DELTA,
+) -> DataFrame:
     """Read every NVD year partition under the silver layer."""
-    logger.info("Loading NVD silver from %s", silver_nvd_dir)
+    if nvd_storage == NVD_STORAGE_DELTA:
+        logger.info("Loading NVD silver Delta table from %s", silver_nvd_delta_dir)
+        return spark.read.format("delta").load(str(silver_nvd_delta_dir))
+
+    logger.info("Loading NVD silver Parquet mirror from %s", silver_nvd_dir)
     return spark.read.parquet(str(silver_nvd_dir))
 
 
@@ -254,6 +267,8 @@ def save_master(df: DataFrame, output_dir: Path) -> int:
 def run_master_build(
     spark: SparkSession,
     silver_nvd_dir: Path = SILVER_NVD_DIR,
+    silver_nvd_delta_dir: Path = SILVER_NVD_DELTA_DIR,
+    nvd_storage: str = NVD_STORAGE_DELTA,
     silver_kev_dir: Path = SILVER_KEV_DIR,
     silver_epss_dir: Path = SILVER_EPSS_DIR,
     output_dir: Path = GOLD_MASTER_DIR,
@@ -262,8 +277,14 @@ def run_master_build(
     """Build and persist the master dataset. Returns row count written."""
     snapshot = snapshot_date_str or get_snapshot_date()
     logger.info("Master build snapshot_date=%s", snapshot)
+    logger.info("NVD silver storage mode: %s", nvd_storage)
 
-    nvd_df = load_nvd(spark, silver_nvd_dir)
+    nvd_df = load_nvd(
+        spark,
+        silver_nvd_dir=silver_nvd_dir,
+        silver_nvd_delta_dir=silver_nvd_delta_dir,
+        nvd_storage=nvd_storage,
+    )
     kev_df = load_kev(spark, silver_kev_dir)
     epss_df = load_epss_for_snapshot(spark, silver_epss_dir, snapshot)
 
@@ -277,6 +298,14 @@ def parse_args() -> argparse.Namespace:
         description="Build the master vulnerability dataset (NVD ⟕ KEV ⟕ snapshot-aligned EPSS)."
     )
     parser.add_argument("--silver-nvd", type=Path, default=SILVER_NVD_DIR)
+    parser.add_argument("--silver-nvd-delta", type=Path,
+                        default=SILVER_NVD_DELTA_DIR)
+    parser.add_argument(
+        "--nvd-storage",
+        choices=[NVD_STORAGE_PARQUET, NVD_STORAGE_DELTA],
+        default=NVD_STORAGE_DELTA,
+        help="NVD silver storage engine. Default: delta. Use parquet for legacy Parquet mirror.",
+    )
     parser.add_argument("--silver-kev", type=Path, default=SILVER_KEV_DIR)
     parser.add_argument("--silver-epss", type=Path, default=SILVER_EPSS_DIR)
     parser.add_argument("--output-dir", type=Path, default=GOLD_MASTER_DIR)
@@ -297,11 +326,14 @@ def main() -> None:
     spark = create_spark_session(
         app_name="master-dataset",
         driver_memory=args.driver_memory,
+        enable_delta=args.nvd_storage == NVD_STORAGE_DELTA,
     )
     try:
         run_master_build(
             spark=spark,
             silver_nvd_dir=args.silver_nvd,
+            silver_nvd_delta_dir=args.silver_nvd_delta,
+            nvd_storage=args.nvd_storage,
             silver_kev_dir=args.silver_kev,
             silver_epss_dir=args.silver_epss,
             output_dir=args.output_dir,
