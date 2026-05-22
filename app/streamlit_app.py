@@ -12,19 +12,23 @@ No direct pd.read_parquet() calls in this file.
 """
 
 from __future__ import annotations
+
 import sys
 from html import escape
 from pathlib import Path
 
 # Ensure the project root is on sys.path so `src.*` imports work regardless
 # of how Streamlit is launched (with or without PYTHONPATH=.).
+# isort: off
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
+# isort: on
 
-import streamlit as st
-import plotly.express as px
 import pandas as pd
+import plotly.express as px
+import streamlit as st
+
 from src.config import (
     DEFAULT_DAILY_CAPACITY,
     DEFAULT_SIMULATION_DAYS,
@@ -719,7 +723,8 @@ elif page == "Vulnerability Explorer":
 
     # ---- Main table with visual severity indicators ------------------------
     if not _no_data(df):
-        _VP_COLOR = {"Critical": "#c0282a", "High": "#c96e00", "Medium": "#a07d00", "Low": "#1d831d"}
+        _VP_COLOR = {"Critical": "#c0282a", "High": "#c96e00",
+                     "Medium": "#a07d00", "Low": "#1d831d"}
         _VP_BG = {
             "Critical": "rgba(214,39,40,0.16)",
             "High":    "rgba(255,127,14,0.16)",
@@ -733,11 +738,14 @@ elif page == "Vulnerability Explorer":
             _vpb = _VP_BG.get(_vlevel, "rgba(128,128,128,0.12)")
             _vcve = escape(str(_vrow.get("cve_id") or "—"))
             _vscore = _vrow.get("priority_score_final")
-            _vscore_s = f"{float(_vscore):.1f}" if _vscore is not None and pd.notna(_vscore) else "—"
+            _vscore_s = f"{float(_vscore):.1f}" if _vscore is not None and pd.notna(
+                _vscore) else "—"
             _vcvss = _vrow.get("cvss_score")
-            _vcvss_s = f"{float(_vcvss):.1f}" if _vcvss is not None and pd.notna(_vcvss) else "—"
+            _vcvss_s = f"{float(_vcvss):.1f}" if _vcvss is not None and pd.notna(
+                _vcvss) else "—"
             _vepss = _vrow.get("epss_score")
-            _vepss_s = f"{float(_vepss):.3f}" if _vepss is not None and pd.notna(_vepss) else "—"
+            _vepss_s = f"{float(_vepss):.3f}" if _vepss is not None and pd.notna(
+                _vepss) else "—"
             _vkev = "🔴" if _vrow.get("is_kev") == 1 else "—"
             _vvendor = escape(str(_vrow.get("primary_vendor") or "—"))
             _vproduct = escape(str(_vrow.get("primary_product") or "—"))
@@ -917,6 +925,7 @@ elif page == "Cluster View":
         def _cf(col, fmt=".4f", _r=_crow):
             v = _r.get(col)
             return format(float(v), fmt) if v is not None and pd.notna(v) else "—"
+
         def _ci(col, _r=_crow):
             v = _r.get(col)
             return f"{int(v):,}" if v is not None and pd.notna(v) else "—"
@@ -1042,7 +1051,6 @@ elif page == "Capacity Simulator":
             _epss = float(_row.get("epss_expected_mitigated", 0) or 0)
             _div = float(_row.get("cluster_diversity", 0) or 0)
             _kev_p = _kev * 100 if _kev <= 1 else _kev
-            _epss_p = _epss * 100 if _epss <= 1 else _epss
             _div_p = _div * 100 if _div <= 1 else _div
             _n_sel = int(_row.get("n_selected", 0) or 0)
             _label = _strat.replace("_", " ").title()
@@ -1054,8 +1062,8 @@ elif page == "Capacity Simulator":
                 f'KEV coverage <span style="font-weight:600">{_kev_p:.0f}%</span></div>'
                 f'{_bar(_kev_p, _color)}'
                 f'<div style="font-size:12px;color:gray;margin-bottom:3px;display:flex;justify-content:space-between">'
-                f'Exploit risk mitigated <span style="font-weight:600">{_epss_p:.0f}%</span></div>'
-                f'{_bar(_epss_p, _color)}'
+                f'Exploit risk mitigated <span style="font-weight:600">{_epss:.2f}</span></div>'
+                f'{_bar(_epss, _color)}'
                 f'<div style="font-size:12px;color:gray;margin-bottom:3px;display:flex;justify-content:space-between">'
                 f'Cluster diversity <span style="font-weight:600">{_div_p:.0f}%</span></div>'
                 f'{_bar(_div_p, _color)}'
