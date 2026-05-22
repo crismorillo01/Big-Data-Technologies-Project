@@ -43,7 +43,8 @@ def configure_logging(level: int = logging.INFO) -> None:
         # Already configured (e.g. by another module or pytest). Just adjust the level.
         root.setLevel(level)
         return
-    logging.basicConfig(level=level, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
+    logging.basicConfig(level=level, format=LOG_FORMAT,
+                        datefmt=LOG_DATE_FORMAT)
 
 
 # ---------------------------------------------------------------------------
@@ -57,28 +58,38 @@ DATA_DIR: Path = PROJECT_ROOT / "data"
 
 # ---- Raw layer (untouched downloads) -------------------------------------
 RAW_DIR: Path = DATA_DIR / "raw"
-RAW_NVD_DIR: Path = RAW_DIR / "nvd"                         # nvdcve-2.0-YYYY.json.gz
+# nvdcve-2.0-YYYY.json.gz
+RAW_NVD_DIR: Path = RAW_DIR / "nvd"
 RAW_NVD_JSON_DIR: Path = RAW_DIR / "nvd_json"               # nvdcve-2.0-YYYY.json
-RAW_NVD_MODIFIED_DIR: Path = RAW_DIR / "nvd_modified"       # partition: snapshot_date=YYYY-MM-DD
+# partition: snapshot_date=YYYY-MM-DD
+RAW_NVD_MODIFIED_DIR: Path = RAW_DIR / "nvd_modified"
 RAW_NVD_MODIFIED_JSON_DIR: Path = RAW_DIR / "nvd_modified_json"
 RAW_KEV_DIR: Path = RAW_DIR / "kev"
 RAW_KEV_FILE: Path = RAW_KEV_DIR / "known_exploited_vulnerabilities.csv"
-RAW_EPSS_DIR: Path = RAW_DIR / "epss"                       # epss_scores-YYYY-MM-DD.csv[.gz]
+# epss_scores-YYYY-MM-DD.csv[.gz]
+RAW_EPSS_DIR: Path = RAW_DIR / "epss"
 
 # ---- Silver layer (clean, typed, partitioned Parquet) --------------------
 SILVER_DIR: Path = DATA_DIR / "silver"
 SILVER_NVD_DIR: Path = SILVER_DIR / "nvd"                   # partition: year=YYYY
-SILVER_NVD_DELTA_DIR: Path = SILVER_DIR / "nvd_delta"       # experimental Delta table
-SILVER_NVD_UPDATES_DIR: Path = SILVER_DIR / "nvd_updates"   # partition: snapshot_date=YYYY-MM-DD
+SILVER_NVD_DELTA_DIR: Path = SILVER_DIR / \
+    "nvd_delta"       # experimental Delta table
+SILVER_NVD_UPDATES_DIR: Path = SILVER_DIR / \
+    "nvd_updates"   # partition: snapshot_date=YYYY-MM-DD
 SILVER_KEV_DIR: Path = SILVER_DIR / "kev"
-SILVER_EPSS_DIR: Path = SILVER_DIR / "epss"                 # partition: score_date=YYYY-MM-DD
+# partition: score_date=YYYY-MM-DD
+SILVER_EPSS_DIR: Path = SILVER_DIR / "epss"
 
 # ---- Gold layer (analytics-ready) ----------------------------------------
 GOLD_DIR: Path = DATA_DIR / "gold"
-GOLD_MASTER_DIR: Path = GOLD_DIR / "master_vulnerabilities"  # part: published_year, snapshot_date
-GOLD_DATA_QUALITY_DIR: Path = GOLD_DIR / "data_quality"      # part: snapshot_date
-GOLD_VULN_SCORES_DIR: Path = GOLD_DIR / "vulnerability_scores"          # base score
-GOLD_VULN_SCORES_FINAL_DIR: Path = GOLD_DIR / "vulnerability_scores_final"  # cluster-aware
+# part: published_year, snapshot_date
+GOLD_MASTER_DIR: Path = GOLD_DIR / "master_vulnerabilities"
+GOLD_DATA_QUALITY_DIR: Path = GOLD_DIR / \
+    "data_quality"      # part: snapshot_date
+GOLD_VULN_SCORES_DIR: Path = GOLD_DIR / \
+    "vulnerability_scores"          # base score
+GOLD_VULN_SCORES_FINAL_DIR: Path = GOLD_DIR / \
+    "vulnerability_scores_final"  # cluster-aware
 GOLD_VULN_CLUSTERED_DIR: Path = GOLD_DIR / "vulnerabilities_clustered"
 GOLD_CLUSTERING_METRICS_DIR: Path = GOLD_DIR / "clustering_metrics"
 GOLD_CLUSTER_TOPICS_DIR: Path = GOLD_DIR / "cluster_topics"
@@ -116,13 +127,14 @@ DEFAULT_NVD_YEARS: list[int] = list(range(2015, 2027))
 # Capacity simulator
 DEFAULT_DAILY_CAPACITY: int = 50      # patches the team can ship per day
 DEFAULT_SIMULATION_DAYS: int = 30     # horizon of the multi-day simulation
-DEFAULT_ARRIVAL_RATE: int = 50        # synthetic CVE arrivals per day
+DEFAULT_ARRIVAL_RATE: int = 150        # synthetic CVE arrivals per day
 
 # Base scoring weights (must sum to 1.0 for cvss + epss + kev; recency is additive)
 DEFAULT_CVSS_WEIGHT: float = 0.4
 DEFAULT_EPSS_WEIGHT: float = 0.4
 DEFAULT_KEV_WEIGHT: float = 0.2
-DEFAULT_RECENCY_WEIGHT: float = 0.0   # off by default; surface as flag for sensitivity
+# off by default; surface as flag for sensitivity
+DEFAULT_RECENCY_WEIGHT: float = 0.0
 # KEV override: any CVE in KEV gets at least this priority score, regardless of weights
 DEFAULT_KEV_OVERRIDE_FLOOR: float = 0.9
 

@@ -14,7 +14,11 @@ from pathlib import Path
 
 import pytest
 
-from src.ingestion.ingest_nvd import load_nvd_year, transform_nvd_year
+from src.ingestion.ingest_nvd import (
+    filter_min_published_year,
+    load_nvd_year,
+    transform_nvd_year,
+)
 
 
 def _nvd_fixture() -> dict:
@@ -169,3 +173,18 @@ def test_reference_count_and_exploit_flag(nvd_silver):
 def test_published_year_is_derived(nvd_silver):
     assert nvd_silver["CVE-2024-0001"]["published_year"] == 2024
     assert nvd_silver["CVE-2024-0002"]["published_year"] == 2024
+
+
+def test_min_published_year_filter_matches_modified_window(spark):
+    df = spark.createDataFrame(
+        [
+            ("CVE-2014-0001", 2014),
+            ("CVE-2015-0001", 2015),
+            ("CVE-2024-0001", 2024),
+        ],
+        ["cve_id", "published_year"],
+    )
+
+    rows = filter_min_published_year(df, min_year=2015).collect()
+
+    assert {row["cve_id"] for row in rows} == {"CVE-2015-0001", "CVE-2024-0001"}

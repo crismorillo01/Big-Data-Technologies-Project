@@ -224,6 +224,11 @@ def transform_nvd_year(df_raw: DataFrame, year: int) -> DataFrame:
     return silver
 
 
+def filter_min_published_year(df: DataFrame, min_year: int) -> DataFrame:
+    """Keep only CVEs published within the configured NVD analysis window."""
+    return df.filter(col("published_year") >= lit(min_year))
+
+
 # ---------------------------------------------------------------------------
 # Write
 # ---------------------------------------------------------------------------
@@ -320,6 +325,7 @@ def run_nvd_ingestion(
     delta_output_dir: Path = SILVER_NVD_DELTA_DIR,
     nvd_storage: str = NVD_STORAGE_DELTA,
     replace_delta_table: bool = False,
+    min_year: int = min(DEFAULT_NVD_YEARS),
     force_download: bool = False,
 ) -> int:
     """Run the year-by-year NVD ingestion. Returns total rows written."""
@@ -333,6 +339,7 @@ def run_nvd_ingestion(
     years_list = list(years)
     logger.info("NVD ingestion starting for years: %s", years_list)
     logger.info("NVD silver storage mode: %s", nvd_storage)
+    logger.info("NVD minimum published year: %d", min_year)
 
     total_rows = 0
     for year in years_list:
@@ -341,7 +348,10 @@ def run_nvd_ingestion(
 
         logger.info("[year %d] reading and transforming", year)
         df_raw = load_nvd_year(spark, json_path)
-        df_silver = transform_nvd_year(df_raw, year)
+        df_silver = filter_min_published_year(
+            transform_nvd_year(df_raw, year),
+            min_year,
+        )
 
         logger.info("[year %d] writing silver partition", year)
         if nvd_storage == NVD_STORAGE_DELTA:
@@ -390,6 +400,12 @@ def parse_args() -> argparse.Namespace:
         help="Drop and recreate the Delta NVD table before writing the first requested year.",
     )
     parser.add_argument(
+        "--min-year",
+        type=int,
+        default=min(DEFAULT_NVD_YEARS),
+        help="Keep only CVEs published from this year onward. Default: 2015.",
+    )
+    parser.add_argument(
         "--force-download",
         action="store_true",
         help="Re-download and re-extract even if local files already exist.",
@@ -422,6 +438,7 @@ def main() -> None:
             delta_output_dir=args.delta_output_dir,
             nvd_storage=args.nvd_storage,
             replace_delta_table=args.replace_delta_table,
+            min_year=args.min_year,
             force_download=args.force_download,
         )
     finally:

@@ -81,6 +81,21 @@ def test_join_master_receives_default_delta_storage():
     assert DELTA_SPARK_PACKAGE in cmd
 
 
+def test_daily_pipeline_refreshes_kev_catalog():
+    steps = build_steps(
+        nvd_years=[2025, 2026],
+        daily_capacity=50,
+        simulation_days=30,
+        driver_memory="3g",
+        snapshot_date="2026-05-21",
+        has_nvd_base=True,
+    )
+
+    kev_step = next(step for step in steps if step.name == "ingest_kev")
+
+    assert "--force-download" in kev_step.args
+
+
 def test_daily_pipeline_can_force_full_nvd_refresh():
     steps = build_steps(
         nvd_years=[2025, 2026],
@@ -98,8 +113,9 @@ def test_daily_pipeline_can_force_full_nvd_refresh():
     assert "--nvd-storage" in steps[0].args
     assert "delta" in steps[0].args
     assert "--replace-delta-table" in steps[0].args
-    assert "--skip-parquet-export" not in steps[0].args
+    assert "--min-year" in steps[0].args
     assert "2025" in steps[0].args
+    assert "--skip-parquet-export" not in steps[0].args
     assert steps[1].name == "ingest_nvd_2026"
     assert "2026" in steps[1].args
     assert "--skip-parquet-export" not in steps[1].args

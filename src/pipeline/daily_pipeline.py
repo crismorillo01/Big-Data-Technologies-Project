@@ -120,6 +120,7 @@ def build_steps(
                 args=common_driver + (
                     "--force-download",
                     "--years", str(year),
+                    "--min-year", str(min_nvd_year),
                     "--nvd-storage", nvd_storage,
                     *(("--replace-delta-table",) if nvd_storage == "delta" and index == 0 else ()),
                 ),
@@ -145,7 +146,7 @@ def build_steps(
         Step(
             name="ingest_kev",
             script="src/ingestion/ingest_kev.py",
-            args=common_driver,
+            args=common_driver + ("--force-download",),
             owner="A",
         ),
         Step(
