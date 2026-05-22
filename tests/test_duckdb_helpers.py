@@ -143,3 +143,30 @@ def test_top_n_vulnerabilities_filters_exact_priority_level(monkeypatch, tmp_pat
 
     assert result["cve_id"].tolist() == ["CVE-2"]
     assert result["priority_level_final"].tolist() == ["High"]
+
+
+def test_strategy_comparison_filters_snapshot(monkeypatch, tmp_path):
+    strategy_dir = tmp_path / "strategy_comparison"
+    _write_snapshot(
+        strategy_dir,
+        "2026-05-19",
+        [
+            {"strategy": "top_priority", "kev_coverage": 0.9},
+            {"strategy": "high_epss", "kev_coverage": 0.4},
+        ],
+    )
+    _write_snapshot(
+        strategy_dir,
+        "2026-05-20",
+        [
+            {"strategy": "top_priority", "kev_coverage": 0.7},
+            {"strategy": "cluster_based", "kev_coverage": 0.3},
+        ],
+    )
+
+    monkeypatch.setattr(duckdb_helpers, "GOLD_STRATEGY_COMPARISON_DIR", strategy_dir)
+
+    result = duckdb_helpers.strategy_comparison("2026-05-20")
+
+    assert result["strategy"].tolist() == ["top_priority", "cluster_based"]
+    assert result["kev_coverage"].tolist() == [0.7, 0.3]

@@ -299,6 +299,9 @@ def simulate_multi_day(
                 int(kev_in_backlog),
                 round(cumulative_epss, 4),
                 float(day),
+                int(daily_capacity),
+                int(n_days),
+                int(arrival_rate),
             ))
         ranked.unpersist(blocking=True)
 
@@ -309,6 +312,9 @@ def simulate_multi_day(
         StructField("kev_in_backlog", LongType(), False),
         StructField("cumulative_mitigated_epss", DoubleType(), False),
         StructField("mean_age_in_backlog", DoubleType(), False),
+        StructField("daily_capacity", IntegerType(), False),
+        StructField("simulation_days", IntegerType(), False),
+        StructField("arrival_rate", IntegerType(), False),
     ])
     write_partitioned(
         spark.createDataFrame(rows, schema),
@@ -408,6 +414,11 @@ def run_capacity_simulation(
     for name, fn in strategy_map.items():
         selected = fn(df, daily_capacity).cache()
         metrics = compute_metrics(df, selected, name)
+        metrics.update({
+            "daily_capacity": int(daily_capacity),
+            "simulation_days": int(simulation_days),
+            "arrival_rate": int(arrival_rate),
+        })
         results.append(metrics)
         _log.info(
             "Strategy %s: kev_coverage=%.2f, epss_mitigated=%.2f",
@@ -429,6 +440,9 @@ def run_capacity_simulation(
         StructField("cluster_diversity", DoubleType(), False),
         StructField("mean_priority_selected", DoubleType(), False),
         StructField("n_selected", LongType(), False),
+        StructField("daily_capacity", IntegerType(), False),
+        StructField("simulation_days", IntegerType(), False),
+        StructField("arrival_rate", IntegerType(), False),
     ])
     write_partitioned(
         spark.createDataFrame(results, strategy_schema),

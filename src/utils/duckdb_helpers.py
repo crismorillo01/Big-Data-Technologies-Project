@@ -209,15 +209,20 @@ def cluster_overview(snapshot_date: str | None = None) -> pd.DataFrame:
 # Strategy comparison
 # ---------------------------------------------------------------------------
 
-def strategy_comparison() -> pd.DataFrame:
-    """Return the strategy comparison table."""
+def strategy_comparison(snapshot_date: str | None = None) -> pd.DataFrame:
+    """Return the strategy comparison table for one snapshot."""
+    actual = _resolve_snapshot(GOLD_STRATEGY_COMPARISON_DIR, snapshot_date)
+    if not actual:
+        return pd.DataFrame()
+
     glob = _glob(GOLD_STRATEGY_COMPARISON_DIR)
     sql = f"""
         SELECT *
-        FROM read_parquet('{glob}', union_by_name=true)
+        FROM read_parquet('{glob}', hive_partitioning=true, union_by_name=true)
+        WHERE CAST(snapshot_date AS VARCHAR) LIKE ?
         ORDER BY kev_coverage DESC
     """
-    return query_parquet(sql)
+    return query_parquet(sql, [f"{actual}%"])
 
 
 # ---------------------------------------------------------------------------

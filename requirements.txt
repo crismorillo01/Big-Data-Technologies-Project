@@ -19,7 +19,7 @@ tenacity==8.5.0              # download retries with exponential backoff
 duckdb==1.0.0                # SQL over Parquet, no server
 
 # ---- Streamlit app ---------------------------------------------------------
-streamlit==1.36.0
+streamlit==1.37.0
 plotly==5.22.0               # used for cluster scatter and simulation timelines
 
 # ---- Testing ---------------------------------------------------------------
