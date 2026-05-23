@@ -1,0 +1,20 @@
+services:
+  app:
+    build:
+      context: .
+    image: vulnintel
+    command: ["app"]
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  pipeline:
+    image: vulnintel
+    build:
+      context: .
+    entrypoint: ["/usr/local/bin/docker-entrypoint.sh", "pipeline"]
+    command: []
+    volumes:
+      - ./data:/app/data

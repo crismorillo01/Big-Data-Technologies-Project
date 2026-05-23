@@ -5,56 +5,44 @@ CISA KEV, EPSS), enriches them with cluster-aware risk signals, and
 produces a ranked patch plan for security teams operating under limited
 remediation capacity.
 
-This is the project for the *Big Data Technologies* course. The full
-implementation contract lives in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
-
----
-
-## What problem does it solve?
-
-A medium-sized organization can have thousands of open CVEs at any time
-and a security team that can only ship a few dozen patches per day.
-Choosing **which** CVEs to fix first is the entire game. The platform
-answers four questions, mapped to the four pillars of the course brief:
-
-1. **Cluster related issues** — group CVEs into families so the team
-   sees patterns instead of noise.
-2. **Estimate likely impact** — score each CVE by severity (CVSS) and
-   exploit risk (EPSS, KEV).
-3. **Track exploitability signals** — keep daily EPSS history and KEV
-   transitions to detect when something is becoming more dangerous.
-4. **Rank remediation actions under limited operational capacity** —
-   produce an actionable patch plan that respects the team's daily
-   throughput, prefers KEV-flagged CVEs, and groups work by
-   `(vendor, product)` so one patch closes many CVEs at once.
-
 ---
 
 ## Architecture
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│ Orchestration                                                       │
-│   src/pipeline/daily_pipeline.py    (manual run or cron schedule)   │
+│ Runtime / Packaging                                                │
+│   Dockerfile                                                       │
+│   docker-compose.yml                                               │
+│   app service → Streamlit on port 8501                             │
+│   pipeline service → daily_pipeline.py with forwarded CLI args     │
 └────────────────────────────────────────────────────────────────────┘
                   │
-       ┌──────────┼──────────┐
-       ▼          ▼          ▼
-┌────────────┐┌────────────┐┌────────────┐    parallel ingestion
-│ ingest_nvd ││ ingest_kev ││ingest_epss │
-└────┬───────┘└──────┬─────┘└──────┬─────┘
-     │               │             │
-     ▼               ▼             ▼
+                  ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│ data/raw/         (.json.gz, .csv, .csv.gz — never modified)        │
+│ Orchestration                                                      │
+│   src/pipeline/daily_pipeline.py    (CLI, Docker, or cron entry)   │
+└────────────────────────────────────────────────────────────────────┘
+                  │
+                  ▼
+┌────────────────────────────────────────────────────────────────────┐
+│ Ingestion                                                          │
+│   ingest_nvd.py | ingest_nvd_modified.py | ingest_kev.py |         │
+│   ingest_epss.py                                                   │
 └────────────────────────────────────────────────────────────────────┘
      │
      ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│ data/silver/      (clean, typed, partitioned Parquet)               │
-│   nvd/year=YYYY/                                                    │
-│   kev/                                                              │
-│   epss/score_date=YYYY-MM-DD/    ← daily snapshots accumulate       │
+│ data/raw/                                                          │
+│   NVD JSON / modified JSON, KEV CSV, EPSS CSV snapshots            │
+└────────────────────────────────────────────────────────────────────┘
+     │
+     ▼
+┌────────────────────────────────────────────────────────────────────┐
+│ data/silver/                                                       │
+│   nvd/year=YYYY/ or nvd_delta/ (+ nvd_updates/ lineage)            │
+│   kev/                                                             │
+│   epss/score_date=YYYY-MM-DD/                                      │
 └────────────────────────────────────────────────────────────────────┘
      │
      ▼
@@ -62,38 +50,45 @@ join_master  ───────────►  data_quality (metrics → gol
      │
      ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│ data/gold/master_vulnerabilities/                                   │
-│   published_year=YYYY/snapshot_date=YYYY-MM-DD/                     │
+│ data/gold/master_vulnerabilities/                                  │
+│   published_year=YYYY/snapshot_date=YYYY-MM-DD/                    │
 └────────────────────────────────────────────────────────────────────┘
      │
      ▼
-priority_scoring         (base score: CVSS, EPSS, KEV override, recency)
+priority_scoring         (CVSS + EPSS percentile + KEV + recency)
      │
      ▼
-clustering               (mixed features: TF-IDF + CWE + vendor + numeric)
+clustering               (TF-IDF + CWE + vendor/product + numeric)
      │
      ▼
-cluster_aware_scoring    (sandwich step — refines score with cluster signals)
+cluster_aware_scoring    (cluster density + cluster EPSS max)
      │
      ▼
-capacity_simulation      (5 strategies, multi-day backlog drain, 4 metrics)
+capacity_simulation      (5 strategies, multi-day backlog simulation)
      │
      ▼
 remediation_actions      (ranked patch plan grouped by (vendor, product))
      │
      ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│ Serving layer                                                       │
-│   DuckDB queries Parquet directly (no ETL, no server).              │
-│   Streamlit app exposes the results interactively.                  │
+│ Serving layer                                                      │
+│   DuckDB queries gold Parquet directly.                            │
+│   Streamlit app exposes the results interactively.                 │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-The data follows a **medallion architecture**: raw is sacred, silver is
-typed and partitioned, gold is analytics-ready. Every gold table is
-partitioned by `snapshot_date` so historical runs are preserved and
-re-running the pipeline only overwrites the current day's partition
-(thanks to `spark.sql.sources.partitionOverwriteMode=dynamic`).
+The data follows a **medallion architecture**: raw stores immutable
+downloads, silver stores typed partitioned snapshots, and gold stores the
+analytics-ready tables. The NVD silver layer supports both the current
+Delta-backed flow and a Parquet fallback, while EPSS keeps one partition
+per `score_date`. Gold tables are partitioned by `snapshot_date`, so
+historical runs are preserved and re-running the pipeline only overwrites
+the current day's partition.
+
+When the project runs in Docker, the same pipeline code executes through
+the `pipeline` service and the Streamlit app is exposed through the `app`
+service. Both services share the same image and persist their outputs under
+`./data`.
 
 ---
 
@@ -109,65 +104,6 @@ All three are public, free and stable.
 
 ---
 
-## Big Data justification
-
-This is a real Big Data system, not a small pandas script that says
-"big" on the label.
-
-- **Variety** — three sources with very different formats and semantics:
-  multi-line nested JSON (NVD, ~150–200 MB per year), flat CSV with
-  unstable column names (KEV), and large gzipped CSV (EPSS, ~250 K rows
-  daily). Each requires a different parser, schema, and join key.
-- **Volume** — 12 years of NVD plus daily-snapshotted EPSS history grows
-  the gold layer into the millions of rows quickly. The full join is
-  produced in PySpark precisely because pandas would not handle it
-  cleanly on the developer's 8 GB RAM laptop.
-- **Velocity** — the source with the fastest cadence is the NVD
-  `modified` feed at every 2 hours; EPSS is daily; KEV is event-driven
-  but rare. We materialize the velocity dimension as a daily batch
-  pipeline; the local cron schedule launches the same deterministic
-  orchestrator every day.
-
-### Why **not** Kafka
-
-All three sources publish at human-readable batch cadences (≥ 2 h),
-with at most ~250 new CVEs and 1 KEV per day. Kafka here would be an
-anti-pattern: pure overhead, no benefit. We argue this trade-off
-explicitly because the brief asks for "careful trade-offs rather than
-trying to build a generic platform for everything." Kafka would be the
-right tool the moment we incorporate **asset-detection telemetry** from
-internal scanners or **GitHub Security Advisory webhooks** — neither is
-in scope today, both are documented as future work.
-
-### Why DuckDB as the serving layer
-
-The Streamlit app needs SQL access to the gold layer without paying for
-an ETL into a server-based database. DuckDB queries Parquet files
-directly with predicate pushdown over our partitions, runs embedded (no
-service to start), and uses ~80 MB RAM only during query execution. We
-get a clean compute-vs-serving separation without duplicating data.
-
-### Why plain Parquet (not Delta / Iceberg)
-
-Parquet is enough for this project's scope: read-only consumers, daily
-batch writes, no concurrent writers, no schema evolution complexity.
-Delta or Iceberg would add ACID transactions, time travel, and upserts
-— all genuinely useful in production, but they would also pull a
-multi-GB dependency tree and configuration burden disproportionate to
-single-node academic work. The trade-off is documented; migration would
-be a one-week task on top of the current code.
-
-### Why cron for orchestration
-
-The pipeline has a real dependency order: ingest the public sources,
-join the master table, score and cluster vulnerabilities, simulate
-capacity, and produce remediation actions. `daily_pipeline.py` keeps
-that order explicit in one lightweight command, and cron is enough to
-run it once per day on a laptop without adding another always-on service
-next to Spark.
-
----
-
 ## Repository layout
 
 ```
@@ -175,33 +111,38 @@ next to Spark.
 ├── README.md                       ← this file
 ├── IMPLEMENTATION_PLAN.md          ← team contract / file-by-file spec
 ├── requirements.txt
+├── Dockerfile                      ← image definition for app + pipeline
+├── docker-compose.yml              ← local app/pipeline service setup
+├── docker-entrypoint.sh            ← container command router
+├── .dockerignore                   ← excludes data, caches, and build junk
 ├── .gitignore
 ├── src/
-│   ├── config.py                   ← every path + Spark session factory
+│   ├── config.py                   ← paths, defaults, Spark session factory
 │   ├── ingestion/
-│   │   ├── ingest_nvd.py           ← year-by-year, partitioned silver
-│   │   ├── ingest_kev.py
-│   │   └── ingest_epss.py          ← snapshots accumulate
+│   │   ├── ingest_nvd.py           ← full NVD yearly ingest
+│   │   ├── ingest_nvd_modified.py  ← modified-feed incremental upsert
+│   │   ├── ingest_kev.py           ← KEV snapshot ingest
+│   │   └── ingest_epss.py          ← daily EPSS snapshots
 │   ├── processing/
-│   │   ├── join_master.py
-│   │   └── data_quality.py         ← metrics → gold
+│   │   ├── join_master.py          ← master assembly
+│   │   └── data_quality.py         ← snapshot metrics
 │   ├── scoring/
-│   │   ├── priority_scoring.py     ← base score with KEV override
-│   │   └── cluster_aware_scoring.py    ← sandwich step
+│   │   ├── priority_scoring.py     ← base score
+│   │   └── cluster_aware_scoring.py ← cluster-adjusted score
 │   ├── clustering/
-│   │   └── clustering.py
+│   │   └── clustering.py            ← vulnerability clustering
 │   ├── optimization/
-│   │   ├── capacity_simulation.py  ← 5 strategies, multi-day
+│   │   ├── capacity_simulation.py   ← strategy simulation
 │   │   └── remediation_actions.py  ← ranked patch plan
 │   ├── pipeline/
-│   │   └── daily_pipeline.py
+│   │   └── daily_pipeline.py        ← end-to-end orchestrator
 │   └── utils/
-│       ├── http.py                 ← download + retries
-│       └── duckdb_helpers.py
+│       ├── http.py                  ← download helpers + retries
+│       └── duckdb_helpers.py       ← serving-layer SQL helpers
 ├── app/
-│   └── streamlit_app.py            ← interactive UI on top of the gold layer
+│   └── streamlit_app.py             ← Streamlit UI
 ├── tests/
-│   └── ...                         ← pytest, small Spark fixture
+│   └── test_*.py                    ← full pytest suite
 └── data/                           ← gitignored; created on first run
     ├── raw/
     ├── silver/
@@ -218,6 +159,8 @@ next to Spark.
 - Java 11 or 17 (PySpark requirement; `brew install openjdk@17` on macOS)
 - ~8 GB RAM (the Spark session is tuned for this; see `src/config.py`)
 - ~2 GB disk for raw + silver + gold across a 12-year window
+- Docker Desktop or Docker Engine with Docker Compose v2, if you want to
+  use the containerized workflow instead of running locally
 
 ### Setup
 
@@ -235,18 +178,17 @@ pip install -r requirements.txt
 python src/pipeline/daily_pipeline.py
 ```
 
-That runs every step in order. Common overrides:
+That runs every step in order. The pipeline also accepts these arguments:
 
-```bash
-# Smaller / faster run (only 2024–2026)
-python src/pipeline/daily_pipeline.py --years 2024 2025 2026
-
-# Tighter RAM budget
-python src/pipeline/daily_pipeline.py --driver-memory 2g
-
-# Bigger simulation horizon
-python src/pipeline/daily_pipeline.py --daily-capacity 30 --simulation-days 60
-```
+| Argument | Default | Example | What it does |
+|---|---|---|---|
+| `--years` | `2015 2016 2017 2018 2019 2020 2021 2022 2023 2024 2025 2026` | `python src/pipeline/daily_pipeline.py --years 2024 2025 2026` | Limits the NVD ingestion window to the listed years. Useful for smaller, faster runs. |
+| `--daily-capacity` | `50` | `python src/pipeline/daily_pipeline.py --daily-capacity 30` | Sets how many vulnerabilities the capacity simulator assumes can be remediated per day. |
+| `--simulation-days` | `30` | `python src/pipeline/daily_pipeline.py --simulation-days 60` | Controls how many days the multi-day simulation should cover. |
+| `--driver-memory` | `3g` | `python src/pipeline/daily_pipeline.py --driver-memory 2g` | Sets the Spark driver heap passed to every step. Lower it on machines with limited RAM. |
+| `--snapshot-date` | `today UTC` | `python src/pipeline/daily_pipeline.py --snapshot-date 2026-05-10` | Forces the gold-layer snapshot date used by the downstream jobs. |
+| `--full-nvd-refresh` | `off` | `python src/pipeline/daily_pipeline.py --full-nvd-refresh` | Re-downloads every yearly NVD feed instead of using the incremental modified feed. |
+| `--nvd-storage` | `delta` | `python src/pipeline/daily_pipeline.py --nvd-storage parquet` | Chooses the storage format for NVD silver output. Use `delta` for the current default flow or `parquet` for legacy mode. |
 
 ### Running a single step
 
@@ -266,7 +208,72 @@ streamlit run app/streamlit_app.py
 Opens at `http://localhost:8501` with five pages: Overview, Vulnerability
 Explorer, Cluster View, Capacity Simulator, Remediation Plan.
 
-### Daily local scheduling with cron
+### Running with Docker Compose
+
+Docker Compose is the recommended way to run the project locally.
+
+Recommended commands:
+
+| Situation | Command |
+|---|---|
+| First time, or after changing the image | `docker compose up --build app` |
+| Start the app again after the image is already built | `docker compose up app` |
+| Run the pipeline with arguments | `docker compose run --rm pipeline` |
+
+Build and start the app in one step:
+
+```bash
+docker compose up --build app
+```
+
+Start the app again after the image is already built:
+
+```bash
+docker compose up app
+```
+
+Run the pipeline on demand:
+
+```bash
+docker compose run --rm pipeline
+```
+
+Any `daily_pipeline.py` argument can be passed after `pipeline`, for
+example `--driver-memory`, `--snapshot-date`, `--full-nvd-refresh`, and
+`--nvd-storage`.
+
+Both services reuse the same image and persist outputs under `./data`.
+The app is available at `http://localhost:8501`.
+
+To stop Docker Compose:
+
+- If you launched it in the foreground, press `Ctrl+C`.
+- If you launched it in detached mode, run `docker compose down`.
+
+### Running with Docker Directly
+
+If you prefer raw Docker commands, build the image once:
+
+```bash
+docker build -t vulnintel .
+```
+
+Run the app:
+
+```bash
+docker run --rm -it -p 8501:8501 -v "$(pwd)/data:/app/data" vulnintel
+```
+
+Run the pipeline:
+
+```bash
+docker run --rm -it -v "$(pwd)/data:/app/data" vulnintel pipeline 
+```
+
+The image already includes Python, Spark, and Java 17, so the host only
+needs Docker if you use this flow.
+
+### Daily scheduling with cron
 
 On macOS/Linux, cron can run the same pipeline every day. Create the
 logs directory first:
@@ -278,71 +285,45 @@ mkdir -p logs
 Then edit the crontab:
 
 ```bash
-crontab -e
+EDITOR=nano crontab -e
 ```
 
-Example daily run at 03:00. Replace the placeholder paths with the
-absolute paths on the machine that will run the job:
+You can schedule the pipeline in two ways:
 
-```cron
-0 3 * * * export JAVA_HOME=/absolute/path/to/java && export PATH=/absolute/path/to/java/bin:/absolute/path/to/Big-Data-Technologies-Project/.venv/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin && cd /absolute/path/to/Big-Data-Technologies-Project && ./.venv/bin/python src/pipeline/daily_pipeline.py >> logs/daily_pipeline.log 2>&1
-```
+- **Local Python environment**
+
+  Replace the placeholder paths with the absolute paths on the machine
+  that will run the job:
+
+  ```cron
+  0 20 * * * export JAVA_HOME=/absolute/path/to/java && export PATH=/absolute/path/to/java/bin:/absolute/path/to/Big-Data-Technologies-Project/.venv/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin && cd /absolute/path/to/Big-Data-Technologies-Project && ./.venv/bin/python src/pipeline/daily_pipeline.py >> logs/daily_pipeline.log 2>&1
+  ```
+
+- **Docker / Docker Compose**
+
+  This version uses the image defined in `Dockerfile` and the service
+  configuration in `docker-compose.yml`, so it does not need the local
+  `.venv` or `JAVA_HOME` setup. Docker Desktop or the Docker daemon must
+  be running when the job fires.
+
+  Replace the placeholder path with the absolute path on the machine that
+  will run the job:
+
+  ```cron
+  0 20 * * * export PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin && cd /absolute/path/to/Big-Data-Technologies-Project && docker compose run --rm pipeline >> /absolute/path/to/Big-Data-Technologies-Project/logs/daily_pipeline.log 2>&1
+  ```
 
 Cron only runs while the computer is awake.
 
----
-
-## Measurable goals
-
-The platform exposes its own KPIs so we can argue the system actually
-works, not just runs.
-
-| Goal | Target | Where it surfaces |
-|---|---|---|
-| Pipeline runtime (12-year window) | < 25 min | `daily_pipeline.py` log summary |
-| % of CVEs with non-null CVSS | > 95% | `data_quality/` |
-| % of CVEs in master with EPSS | > 90% | `data_quality/` |
-| KEV coverage at capacity 50/day | > 80% | `strategy_comparison/` |
-| EPSS-expected exploits prevented (vs. random baseline) | > 10× | `strategy_comparison/` |
-| Cluster silhouette (final K) | > 0.10 | `clustering_metrics/` |
-| Top-keywords per cluster are interpretable | qualitative | `cluster_topics/` + Streamlit |
-
----
-
-## Limitations and future work
-
-- **No CPE for ~25% of recent CVEs.** NVD prioritizes KEV-listed CVEs
-  for full enrichment as of April 2026; the rest may be missing CPE
-  matches. Our `primary_vendor`/`primary_product` columns fall back to
-  KEV's own vendor/product when CPE is absent, but the patch plan loses
-  granularity for unenriched CVEs.
-- **No package-ecosystem coverage.** OSV.dev (npm, PyPI, Cargo, Go,
-  Maven…) would let the patch plan target dependency upgrades by
-  ecosystem. Out of scope for v1.
-- **No streaming layer.** All sources are batch-published. If the
-  organization wants to react to new KEV entries within minutes, a
-  Kafka topic for KEV deltas would be the natural addition.
-- **Single-node Spark only.** Tuned for 8 GB RAM laptops; horizontal
-  scale would require swapping `local[*]` for a real cluster and
-  adjusting `spark.executor.memory`.
-- **No authentication on the Streamlit app.** Single-user demo only.
-- **Synthetic capacity-simulator arrivals.** Real arrivals would come
-  from the daily NVD `recent` feed; we approximate with a configurable
-  `--arrival-rate` parameter for reproducibility.
-
----
-
 ## Team
 
-| Person | Slice | Files owned |
+| Member | Main slice | Current files |
 |---|---|---|
-| **A** | Infrastructure, ingestion, master | `src/config.py`, `src/utils/http.py`, `src/ingestion/*`, `src/processing/join_master.py`, `src/pipeline/daily_pipeline.py`, `requirements.txt`, `.gitignore`, `README.md` |
-| **B** | Data quality, scoring, clustering | `src/processing/data_quality.py`, `src/scoring/priority_scoring.py`, `src/scoring/cluster_aware_scoring.py`, `src/clustering/clustering.py` |
-| **C** | Simulation, remediation, app | `src/optimization/capacity_simulation.py`, `src/optimization/remediation_actions.py`, `src/utils/duckdb_helpers.py`, `app/streamlit_app.py` |
+| Cristina Morillo | Infrastructure, ingestion, master, pipeline, Docker | `src/config.py`, `src/utils/http.py`, `src/ingestion/*`, `src/processing/join_master.py`, `src/pipeline/daily_pipeline.py`, `Dockerfile`, `docker-compose.yml`, `docker-entrypoint.sh`, `.dockerignore` |
+| Francesco Leoni | Data quality, scoring, clustering | `src/processing/data_quality.py`, `src/scoring/priority_scoring.py`, `src/scoring/cluster_aware_scoring.py`, `src/clustering/clustering.py` |
+| Vo Thuy Trang | Simulation, remediation, serving app | `src/optimization/capacity_simulation.py`, `src/optimization/remediation_actions.py`, `src/utils/duckdb_helpers.py`, `app/streamlit_app.py` |
 
-Each owner writes the tests for their own files. See
-[`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for the file-by-file
-contract and the prompt template each teammate can use with Claude.
+Each contributor owns the tests for their slice.
 
 ---
 
