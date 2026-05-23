@@ -108,42 +108,42 @@ All three are public, free and stable.
 
 ```
 .
-├── README.md                       ← this file
-├── IMPLEMENTATION_PLAN.md          ← team contract / file-by-file spec
-├── requirements.txt
-├── Dockerfile                      ← image definition for app + pipeline
-├── docker-compose.yml              ← local app/pipeline service setup
-├── docker-entrypoint.sh            ← container command router
-├── .dockerignore                   ← excludes data, caches, and build junk
-├── .gitignore
+├── README.md                        ← this file
+├── requirements.txt                 ← Python package dependencies
+├── Dockerfile                       ← image definition for app + pipeline
+├── docker-compose.yml               ← local app/pipeline service setup
+├── docker-entrypoint.sh             ← container command router
+├── .dockerignore                    ← excludes data, caches, and build junk
+├── .gitignore                       ← excludes generated files and local-only artifacts
+├── team_contributions/              ← individual team member contribution notes
 ├── src/
-│   ├── config.py                   ← paths, defaults, Spark session factory
+│   ├── config.py                    ← paths, defaults, Spark session factory
 │   ├── ingestion/
-│   │   ├── ingest_nvd.py           ← full NVD yearly ingest
-│   │   ├── ingest_nvd_modified.py  ← modified-feed incremental upsert
-│   │   ├── ingest_kev.py           ← KEV snapshot ingest
-│   │   └── ingest_epss.py          ← daily EPSS snapshots
+│   │   ├── ingest_nvd.py            ← full NVD yearly ingest
+│   │   ├── ingest_nvd_modified.py   ← modified-feed incremental upsert
+│   │   ├── ingest_kev.py            ← KEV snapshot ingest
+│   │   └── ingest_epss.py           ← daily EPSS snapshots
 │   ├── processing/
-│   │   ├── join_master.py          ← master assembly
-│   │   └── data_quality.py         ← snapshot metrics
+│   │   ├── join_master.py           ← master assembly
+│   │   └── data_quality.py          ← snapshot metrics
 │   ├── scoring/
-│   │   ├── priority_scoring.py     ← base score
+│   │   ├── priority_scoring.py      ← base score
 │   │   └── cluster_aware_scoring.py ← cluster-adjusted score
 │   ├── clustering/
 │   │   └── clustering.py            ← vulnerability clustering
 │   ├── optimization/
 │   │   ├── capacity_simulation.py   ← strategy simulation
-│   │   └── remediation_actions.py  ← ranked patch plan
+│   │   └── remediation_actions.py   ← ranked patch plan
 │   ├── pipeline/
 │   │   └── daily_pipeline.py        ← end-to-end orchestrator
 │   └── utils/
 │       ├── http.py                  ← download helpers + retries
-│       └── duckdb_helpers.py       ← serving-layer SQL helpers
+│       └── duckdb_helpers.py        ← serving-layer SQL helpers
 ├── app/
 │   └── streamlit_app.py             ← Streamlit UI
 ├── tests/
 │   └── test_*.py                    ← full pytest suite
-└── data/                           ← gitignored; created on first run
+└── data/                            ← gitignored; created on first run
     ├── raw/
     ├── silver/
     └── gold/
@@ -319,7 +319,7 @@ Cron only runs while the computer is awake.
 
 | Member | Main slice | Current files |
 |---|---|---|
-| Cristina Morillo | Infrastructure, ingestion, master, pipeline, Docker | `src/config.py`, `src/utils/http.py`, `src/ingestion/*`, `src/processing/join_master.py`, `src/pipeline/daily_pipeline.py`, `Dockerfile`, `docker-compose.yml`, `docker-entrypoint.sh`, `.dockerignore` |
+| Cristina Morillo | Infrastructure, ingestion, master, pipeline, Docker | `src/config.py`, `src/utils/http.py`, `src/ingestion/*`, `src/processing/join_master.py`, `src/pipeline/daily_pipeline.py`, `Dockerfile`, `docker-compose.yml`, `docker-entrypoint.sh` |
 | Francesco Leoni | Data quality, scoring, clustering | `src/processing/data_quality.py`, `src/scoring/priority_scoring.py`, `src/scoring/cluster_aware_scoring.py`, `src/clustering/clustering.py` |
 | Vo Thuy Trang | Simulation, remediation, serving app | `src/optimization/capacity_simulation.py`, `src/optimization/remediation_actions.py`, `src/utils/duckdb_helpers.py`, `app/streamlit_app.py` |
 
