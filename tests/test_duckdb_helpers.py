@@ -170,3 +170,66 @@ def test_strategy_comparison_filters_snapshot(monkeypatch, tmp_path):
 
     assert result["strategy"].tolist() == ["top_priority", "cluster_based"]
     assert result["kev_coverage"].tolist() == [0.7, 0.3]
+
+
+def test_remediation_recommendations_filters_strategy_and_snapshot(monkeypatch, tmp_path):
+    recommendations_dir = tmp_path / "remediation_recommendations"
+    _write_snapshot(
+        recommendations_dir / "high_epss",
+        "2026-05-19",
+        [
+            {
+                "cve_id": "CVE-1",
+                "priority_score_final": 0.60,
+                "epss_score": 0.20,
+                "is_kev": 0,
+                "cvss_score": 6.0,
+                "primary_vendor": "acme",
+                "primary_product": "old",
+            },
+            {
+                "cve_id": "CVE-2",
+                "priority_score_final": 0.70,
+                "epss_score": 0.80,
+                "is_kev": 1,
+                "cvss_score": 7.0,
+                "primary_vendor": "acme",
+                "primary_product": "old",
+            },
+        ],
+    )
+    _write_snapshot(
+        recommendations_dir / "high_epss",
+        "2026-05-20",
+        [
+            {
+                "cve_id": "CVE-3",
+                "priority_score_final": 0.90,
+                "epss_score": 0.95,
+                "is_kev": 1,
+                "cvss_score": 8.0,
+                "primary_vendor": "acme",
+                "primary_product": "new",
+            },
+            {
+                "cve_id": "CVE-4",
+                "priority_score_final": 0.40,
+                "epss_score": 0.10,
+                "is_kev": 0,
+                "cvss_score": 4.0,
+                "primary_vendor": "acme",
+                "primary_product": "new",
+            },
+        ],
+    )
+
+    monkeypatch.setattr(duckdb_helpers, "GOLD_REMEDIATION_RECOMMENDATIONS_DIR", recommendations_dir)
+
+    result = duckdb_helpers.remediation_recommendations(
+        "high_epss",
+        top_n=1,
+        snapshot_date="2026-05-20",
+    )
+
+    assert result["cve_id"].tolist() == ["CVE-3"]
+    assert result["epss_score"].tolist() == [0.95]

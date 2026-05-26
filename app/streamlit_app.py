@@ -16,6 +16,7 @@ from __future__ import annotations
 import sys
 from html import escape
 from pathlib import Path
+from textwrap import dedent
 
 # Ensure the project root is on sys.path so `src.*` imports work regardless
 # of how Streamlit is launched (with or without PYTHONPATH=.).
@@ -40,6 +41,7 @@ from src.utils.duckdb_helpers import (
     data_quality_latest,
     overview_stats,
     remediation_actions,
+    remediation_recommendations,
     simulation_timeseries,
     strategy_comparison,
     top_n_vulnerabilities,
@@ -746,21 +748,25 @@ elif page == "Vulnerability Explorer":
             _vepss = _vrow.get("epss_score")
             _vepss_s = f"{float(_vepss):.3f}" if _vepss is not None and pd.notna(
                 _vepss) else "—"
-            _vkev = "🔴" if _vrow.get("is_kev") == 1 else "—"
+            _vkev = (
+                '<span class="explorer-kev-badge">KEV</span>'
+                if _vrow.get("is_kev") == 1
+                else '<span class="explorer-kev-muted">—</span>'
+            )
             _vvendor = escape(str(_vrow.get("primary_vendor") or "—"))
             _vproduct = escape(str(_vrow.get("primary_product") or "—"))
             _vpub = str(_vrow.get("published") or "—")[:10]
             _vbadge = (
-                f'<span class="intel-badge" style="color:{_vpc};background:{_vpb};">'
+                f'<span class="explorer-badge" style="color:{_vpc};background:{_vpb};">'
                 f'{escape(_vlevel)}</span>'
             ) if _vlevel else "—"
             _vuln_rows.append(
                 f'<tr>'
-                f'<td class="intel-mono">{_vcve}</td>'
-                f'<td class="intel-number">{_vscore_s}</td>'
+                f'<td class="explorer-mono">{_vcve}</td>'
+                f'<td class="explorer-number">{_vscore_s}</td>'
                 f'<td>{_vbadge}</td>'
-                f'<td class="intel-number">{_vcvss_s}</td>'
-                f'<td class="intel-number">{_vepss_s}</td>'
+                f'<td class="explorer-number">{_vcvss_s}</td>'
+                f'<td class="explorer-number">{_vepss_s}</td>'
                 f'<td style="text-align:center;">{_vkev}</td>'
                 f'<td>{_vvendor}</td>'
                 f'<td>{_vproduct}</td>'
@@ -768,8 +774,73 @@ elif page == "Vulnerability Explorer":
                 f'</tr>'
             )
         st.markdown(
-            '<div class="intel-table-shell" style="max-height:420px;overflow-y:auto;">'
-            '<table class="intel-table">'
+            '<style>'
+            '.explorer-table-shell {'
+            '  border: 1px solid rgba(128,128,128,0.24);'
+            '  border-radius: 14px;'
+            '  max-height: 420px;'
+            '  overflow: auto;'
+            '  margin-top: 0.75rem;'
+            '}'
+            '.explorer-table {'
+            '  width: 100%;'
+            '  min-width: 760px;'
+            '  border-collapse: collapse;'
+            '  font-size: 0.92rem;'
+            '}'
+            '.explorer-table thead th {'
+            '  background: rgba(128,128,128,0.12);'
+            '  color: rgba(250,250,250,0.72);'
+            '  padding: 0.82rem 0.7rem;'
+            '  text-align: left;'
+            '  white-space: nowrap;'
+            '  font-weight: 600;'
+            '}'
+            '.explorer-table tbody td {'
+            '  border-top: 1px solid rgba(128,128,128,0.16);'
+            '  padding: 0.72rem 0.7rem;'
+            '  vertical-align: middle;'
+            '}'
+            '.explorer-table tbody tr:hover {'
+            '  background: rgba(28,131,225,0.08);'
+            '}'
+            '.explorer-number {'
+            '  text-align: right;'
+            '  font-variant-numeric: tabular-nums;'
+            '}'
+            '.explorer-mono {'
+            '  font-family: monospace;'
+            '  font-variant-numeric: tabular-nums;'
+            '}'
+            '.explorer-badge {'
+            '  border-radius: 999px;'
+            '  display: inline-flex;'
+            '  font-size: 0.82rem;'
+            '  font-weight: 700;'
+            '  justify-content: center;'
+            '  min-width: 5.1rem;'
+            '  padding: 0.24rem 0.68rem;'
+            '}'
+            '.explorer-kev-badge {'
+            '  align-items: center;'
+            '  background: rgba(255,91,97,0.14);'
+            '  border-radius: 999px;'
+            '  color: #ff5b61;'
+            '  display: inline-flex;'
+            '  font-size: 0.82rem;'
+            '  font-weight: 700;'
+            '  justify-content: center;'
+            '  min-width: 2.2rem;'
+            '  padding: 0.24rem 0.68rem;'
+            '}'
+            '.explorer-kev-muted {'
+            '  color: rgba(250,250,250,0.58);'
+            '}'
+            '</style>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="explorer-table-shell"><table class="explorer-table">'
             '<thead><tr>'
             '<th>CVE ID</th><th>Score</th><th>Level</th><th>CVSS</th>'
             '<th>EPSS</th><th>KEV</th><th>Vendor</th><th>Product</th><th>Published</th>'
@@ -931,18 +1002,60 @@ elif page == "Cluster View":
             return f"{int(v):,}" if v is not None and pd.notna(v) else "—"
         _cl_rows.append(
             f'<tr>'
-            f'<td class="intel-number">{_ci("cluster_id")}</td>'
-            f'<td class="intel-number">{_ci("cluster_size")}</td>'
-            f'<td class="intel-number">{_cf("kev_density")}</td>'
-            f'<td class="intel-number intel-kev-val">{_ci("n_kev")}</td>'
-            f'<td class="intel-number">{_cf("avg_priority_final")}</td>'
-            f'<td class="intel-number">{_cf("avg_cvss")}</td>'
-            f'<td class="intel-number">{_cf("avg_epss")}</td>'
-            f'<td class="intel-number">{_cf("max_epss")}</td>'
+            f'<td class="cluster-number">{_ci("cluster_id")}</td>'
+            f'<td class="cluster-number">{_ci("cluster_size")}</td>'
+            f'<td class="cluster-number">{_cf("kev_density")}</td>'
+            f'<td class="cluster-number cluster-kev">{_ci("n_kev")}</td>'
+            f'<td class="cluster-number">{_cf("avg_priority_final")}</td>'
+            f'<td class="cluster-number">{_cf("avg_cvss")}</td>'
+            f'<td class="cluster-number">{_cf("avg_epss")}</td>'
+            f'<td class="cluster-number">{_cf("max_epss")}</td>'
             f'</tr>'
         )
     st.markdown(
-        '<div class="intel-table-shell"><table class="intel-table">'
+        '<style>'
+        '.cluster-table-shell {'
+        '  border: 1px solid rgba(128,128,128,0.24);'
+        '  border-radius: 14px;'
+        '  max-height: 420px;'
+        '  overflow: auto;'
+        '  margin: 0.5rem 0 1.25rem;'
+        '}'
+        '.cluster-table {'
+        '  width: 100%;'
+        '  min-width: 760px;'
+        '  border-collapse: collapse;'
+        '  font-size: 0.92rem;'
+        '}'
+        '.cluster-table thead th {'
+        '  background: rgba(128,128,128,0.12);'
+        '  color: rgba(250,250,250,0.72);'
+        '  font-weight: 600;'
+        '  padding: 0.82rem 0.7rem;'
+        '  text-align: left;'
+        '  white-space: nowrap;'
+        '}'
+        '.cluster-table tbody td {'
+        '  border-top: 1px solid rgba(128,128,128,0.16);'
+        '  padding: 0.72rem 0.7rem;'
+        '  vertical-align: middle;'
+        '}'
+        '.cluster-table tbody tr:hover {'
+        '  background: rgba(28,131,225,0.08);'
+        '}'
+        '.cluster-number {'
+        '  text-align: right;'
+        '  font-variant-numeric: tabular-nums;'
+        '}'
+        '.cluster-kev {'
+        '  color: #ff5b61;'
+        '  font-weight: 600;'
+        '}'
+        '</style>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="cluster-table-shell"><table class="cluster-table">'
         '<thead><tr>'
         '<th>Cluster</th><th>Size</th><th>KEV Density</th><th>KEV CVEs</th>'
         '<th>Avg Priority</th><th>Avg CVSS</th><th>Avg EPSS</th><th>Max EPSS</th>'
@@ -1125,72 +1238,78 @@ elif page == "Capacity Simulator":
 elif page == "Remediation Plan":
     st.title("Remediation Plan")
     st.caption(
-        "Ranked patching actions by vendor · product. "
-        "Higher action score = more impact per unit effort."
+        "Two views of the same remediation problem: one grouped by vendor/product, "
+        "and one driven by capacity strategy selections."
     )
 
-    # ── Top-N chips + Export CSV ─────────────────────────────────────────────
-    _rcol1, _rcol2 = st.columns([6, 2])
-    with _rcol1:
-        top_n = st.radio(
-            "Show top",
-            [10, 25, 50, 100],
-            horizontal=True,
-            key="rem_top_n",
-        )
-    actions = _remediation_actions(top_n, snapshot_date)
+    vendor_tab, strategy_tab = st.tabs(["By vendor/product", "By capacity strategy"])
 
-    if _no_data(actions, "Remediation actions not yet generated."):
-        st.stop()
-
-    actions = actions.reset_index(drop=True)
-
-    _display_cols = [c for c in [
-        "primary_vendor", "primary_product", "n_cves", "n_kev",
-        "max_priority", "mean_epss", "action_score",
-    ] if c in actions.columns]
-    _export_cols = [c for c in [
-        *_display_cols,
-        "max_epss", "sum_priority", "effort_proxy", "top_cves",
-    ] if c in actions.columns]
-
-    with _rcol2:
-        st.download_button(
-            "Export CSV",
-            data=actions[_export_cols].to_csv(index=False).encode("utf-8"),
-            file_name=f"remediation_plan_{snapshot_date or 'latest'}.csv",
-            mime="text/csv",
-            use_container_width=True,
+    with vendor_tab:
+        st.caption(
+            "Ranked patching actions by vendor · product. "
+            "Higher action score = more impact per unit effort."
         )
 
-    # ── Clickable table + details ────────────────────────────────────────────
-    _P_COLOR = {"Critical": "#c0282a", "High": "#c96e00",
-                "Medium": "#a07d00", "Low": "#1d831d"}
-    _P_BG = {
-        "Critical": "rgba(214,39,40,0.16)",
-        "High":    "rgba(255,127,14,0.16)",
-        "Medium":  "rgba(200,155,0,0.16)",
-        "Low":     "rgba(44,160,44,0.16)",
-    }
+        _rcol1, _rcol2 = st.columns([6, 2])
+        with _rcol1:
+            top_n = st.radio(
+                "Show top",
+                [10, 25, 50, 100],
+                horizontal=True,
+                key="rem_top_n",
+            )
+        actions = _remediation_actions(top_n, snapshot_date)
 
-    def _remediation_detail_card(row: pd.Series, idx: int) -> str:
-        vendor = str(row.get("primary_vendor", "") or "")
-        product = str(row.get("primary_product", "") or "")
-        n_cves = int(row.get("n_cves", 0) or 0)
-        n_kev = int(row.get("n_kev", 0) or 0)
-        max_epss = float(row.get("max_epss", 0) or 0)
-        action_score = float(row.get("action_score", 0) or 0)
-        priority = _priority_label(row.get("max_priority"))
-        top_cves = _as_list(row.get("top_cves"))
-        initials = (vendor[:2] if vendor else "??").upper()
-        pc = _P_COLOR.get(priority, "gray")
-        pb = _P_BG.get(priority, "rgba(128,128,128,0.1)")
-        cve_tags = " ".join(
-            f'<span class="remediation-cve-tag">{escape(str(cve))}</span>'
-            for cve in top_cves[:10] if cve
-        ) or '<span class="remediation-muted">No CVE data available</span>'
+        if _no_data(actions, "Remediation actions not yet generated."):
+            st.stop()
 
-        return f"""
+        actions = actions.reset_index(drop=True)
+
+        _display_cols = [c for c in [
+            "primary_vendor", "primary_product", "n_cves", "n_kev",
+            "max_priority", "mean_epss", "action_score",
+        ] if c in actions.columns]
+        _export_cols = [c for c in [
+            *_display_cols,
+            "max_epss", "sum_priority", "effort_proxy", "top_cves",
+        ] if c in actions.columns]
+
+        with _rcol2:
+            st.download_button(
+                "Export CSV",
+                data=actions[_export_cols].to_csv(index=False).encode("utf-8"),
+                file_name=f"remediation_plan_{snapshot_date or 'latest'}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        _P_COLOR = {"Critical": "#c0282a", "High": "#c96e00",
+                    "Medium": "#a07d00", "Low": "#1d831d"}
+        _P_BG = {
+            "Critical": "rgba(214,39,40,0.16)",
+            "High":    "rgba(255,127,14,0.16)",
+            "Medium":  "rgba(200,155,0,0.16)",
+            "Low":     "rgba(44,160,44,0.16)",
+        }
+
+        def _remediation_detail_card(row: pd.Series, idx: int) -> str:
+            vendor = str(row.get("primary_vendor", "") or "")
+            product = str(row.get("primary_product", "") or "")
+            n_cves = int(row.get("n_cves", 0) or 0)
+            n_kev = int(row.get("n_kev", 0) or 0)
+            max_epss = float(row.get("max_epss", 0) or 0)
+            action_score = float(row.get("action_score", 0) or 0)
+            priority = _priority_label(row.get("max_priority"))
+            top_cves = _as_list(row.get("top_cves"))
+            initials = (vendor[:2] if vendor else "??").upper()
+            pc = _P_COLOR.get(priority, "gray")
+            pb = _P_BG.get(priority, "rgba(128,128,128,0.1)")
+            cve_tags = " ".join(
+                f'<span class="remediation-cve-tag">{escape(str(cve))}</span>'
+                for cve in top_cves[:10] if cve
+            ) or '<span class="remediation-muted">No CVE data available</span>'
+
+            return f"""
 <section class="remediation-detail-card remediation-detail-{idx}">
   <div class="remediation-detail-head">
     <div class="remediation-initials">{escape(initials)}</div>
@@ -1212,241 +1331,449 @@ elif page == "Remediation Plan":
 </section>
 """
 
-    _max_action_score = float(actions["action_score"].max() or 1.0)
-    _action_targets = []
-    _table_rows = []
-    _selection_css = []
-    _detail_cards = []
-    for _idx, _row in actions.iterrows():
-        _control_id = f"remediation-action-{_idx}"
-        _vendor = escape(str(_row.get("primary_vendor", "") or ""))
-        _product = escape(str(_row.get("primary_product", "") or ""))
-        _n_cves = int(_row.get("n_cves", 0) or 0)
-        _n_kev = int(_row.get("n_kev", 0) or 0)
-        _mean_epss = float(_row.get("mean_epss", 0) or 0)
-        _score = float(_row.get("action_score", 0) or 0)
-        _priority = _priority_label(_row.get("max_priority"))
-        _pc = _P_COLOR.get(_priority, "gray")
-        _pb = _P_BG.get(_priority, "rgba(128,128,128,0.12)")
-        _score_width = max(0.0, min(100.0, 100 * _score / _max_action_score))
-        _cells = (
-            f'<td><a href="#{_control_id}">{_idx + 1}</a></td>'
-            f'<td><a href="#{_control_id}">{_vendor}</a></td>'
-            f'<td><a href="#{_control_id}">{_product}</a></td>'
-            f'<td class="remediation-number"><a href="#{_control_id}">{_n_cves:,}</a></td>'
-            f'<td class="remediation-number remediation-kev"><a href="#{_control_id}">{_n_kev:,}</a></td>'
-            f'<td><a href="#{_control_id}"><span class="remediation-badge" '
-            f'style="color:{_pc};background:{_pb};">{_priority}</span></a></td>'
-            f'<td class="remediation-number"><a href="#{_control_id}">{_mean_epss:.2f}</a></td>'
-            f'<td><a href="#{_control_id}"><span class="remediation-score">'
-            f'<span class="remediation-score-track"><span style="width:{_score_width:.1f}%"></span></span>'
-            f'<span>{_score:.2f}</span></span></a></td>'
-        )
-        _action_targets.append(
-            f'<span class="remediation-target" id="{_control_id}"></span>')
-        _table_rows.append(
-            f'<tr class="remediation-row remediation-row-{_idx}">{_cells}</tr>')
-        _selection_css.append(
-            f'#{_control_id}:target ~ .remediation-table-shell .remediation-row-{_idx}'
-            ' { background: rgba(28,131,225,0.18); }'
-        )
-        _selection_css.append(
-            f'#{_control_id}:target ~ .remediation-details .remediation-detail-{_idx}'
-            ' { display: block; }'
-        )
-        _detail_cards.append(_remediation_detail_card(_row, _idx))
+        _max_action_score = float(actions["action_score"].max() or 1.0)
+        _action_targets = []
+        _table_rows = []
+        _selection_css = []
+        _detail_cards = []
+        for _idx, _row in actions.iterrows():
+            _control_id = f"remediation-action-{_idx}"
+            _vendor = escape(str(_row.get("primary_vendor", "") or ""))
+            _product = escape(str(_row.get("primary_product", "") or ""))
+            _n_cves = int(_row.get("n_cves", 0) or 0)
+            _n_kev = int(_row.get("n_kev", 0) or 0)
+            _mean_epss = float(_row.get("mean_epss", 0) or 0)
+            _score = float(_row.get("action_score", 0) or 0)
+            _priority = _priority_label(_row.get("max_priority"))
+            _pc = _P_COLOR.get(_priority, "gray")
+            _pb = _P_BG.get(_priority, "rgba(128,128,128,0.12)")
+            _score_width = max(0.0, min(100.0, 100 * _score / _max_action_score))
+            _cells = (
+                f'<td><a href="#{_control_id}">{_idx + 1}</a></td>'
+                f'<td><a href="#{_control_id}">{_vendor}</a></td>'
+                f'<td><a href="#{_control_id}">{_product}</a></td>'
+                f'<td class="remediation-number"><a href="#{_control_id}">{_n_cves:,}</a></td>'
+                f'<td class="remediation-number remediation-kev"><a href="#{_control_id}">{_n_kev:,}</a></td>'
+                f'<td><a href="#{_control_id}"><span class="remediation-badge" '
+                f'style="color:{_pc};background:{_pb};">{_priority}</span></a></td>'
+                f'<td class="remediation-number"><a href="#{_control_id}">{_mean_epss:.2f}</a></td>'
+                f'<td><a href="#{_control_id}"><span class="remediation-score">'
+                f'<span class="remediation-score-track"><span style="width:{_score_width:.1f}%"></span></span>'
+                f'<span>{_score:.2f}</span></span></a></td>'
+            )
+            _action_targets.append(
+                f'<span class="remediation-target" id="{_control_id}"></span>')
+            _table_rows.append(
+                f'<tr class="remediation-row remediation-row-{_idx}">{_cells}</tr>')
+            _selection_css.append(
+                f'#{_control_id}:target ~ .remediation-table-shell .remediation-row-{_idx}'
+                ' { background: rgba(28,131,225,0.18); }'
+            )
+            _selection_css.append(
+                f'#{_control_id}:target ~ .remediation-details .remediation-detail-{_idx}'
+                ' { display: block; }'
+            )
+            _detail_cards.append(_remediation_detail_card(_row, _idx))
 
-    st.markdown(
-        """
-        <style>
-        .remediation-target {
-            display: block;
-            height: 0;
-            scroll-margin-top: 1rem;
-        }
-        .remediation-table-shell {
-            border: 1px solid rgba(128,128,128,0.24);
-            border-radius: 10px;
-            overflow-x: auto;
-            margin: 0.5rem 0 1.25rem;
-        }
-        .remediation-table {
-            width: 100%;
-            min-width: 760px;
-            border-collapse: collapse;
-            font-size: 0.92rem;
-        }
-        .remediation-table th {
-            background: rgba(128,128,128,0.12);
-            color: rgba(250,250,250,0.72);
-            font-weight: 600;
-            padding: 0.75rem 0.7rem;
-            text-align: left;
-            white-space: nowrap;
-        }
-        .remediation-table td {
-            border-top: 1px solid rgba(128,128,128,0.2);
-            padding: 0;
-            vertical-align: middle;
-        }
-        .remediation-table td a {
-            color: inherit;
-            cursor: pointer;
-            display: block;
-            min-height: 2.85rem;
-            padding: 0.72rem 0.7rem;
-            text-decoration: none;
-        }
-        .remediation-row:hover {
-            background: rgba(28,131,225,0.08);
-        }
-        .remediation-number {
-            font-variant-numeric: tabular-nums;
-            text-align: right;
-        }
-        .remediation-kev {
-            color: #ff5b61;
-            font-weight: 600;
-        }
-        .remediation-badge {
-            border-radius: 999px;
-            display: inline-flex;
-            font-size: 0.82rem;
-            font-weight: 700;
-            justify-content: center;
-            min-width: 5.1rem;
-            padding: 0.24rem 0.68rem;
-        }
-        .remediation-score {
-            align-items: center;
-            display: grid;
-            gap: 0.6rem;
-            grid-template-columns: minmax(5.5rem, 1fr) auto;
-            font-variant-numeric: tabular-nums;
-        }
-        .remediation-score-track {
-            background: rgba(128,128,128,0.2);
-            border-radius: 999px;
-            display: block;
-            height: 0.42rem;
-            overflow: hidden;
-        }
-        .remediation-score-track span {
-            background: #378add;
-            border-radius: inherit;
-            display: block;
-            height: 100%;
-        }
-        .remediation-detail-card {
-            border: 1px solid rgba(128,128,128,0.2);
-            border-radius: 12px;
-            display: none;
-            margin-top: 0.5rem;
-            padding: 1rem 1.25rem;
-        }
-        .remediation-detail-head {
-            align-items: center;
-            border-bottom: 1px solid rgba(128,128,128,0.15);
-            display: flex;
-            gap: 0.75rem;
-            margin-bottom: 0.9rem;
-            padding-bottom: 0.9rem;
-        }
-        .remediation-initials {
-            align-items: center;
-            background: rgba(28,131,225,0.12);
-            border-radius: 8px;
-            color: rgb(28,131,225);
-            display: flex;
-            flex: 0 0 auto;
-            font-size: 0.84rem;
-            font-weight: 600;
-            height: 2.3rem;
-            justify-content: center;
-            width: 2.3rem;
-        }
-        .remediation-detail-title {
-            font-size: 0.96rem;
-            font-weight: 600;
-        }
-        .remediation-muted {
-            color: rgba(250,250,250,0.58);
-            font-size: 0.82rem;
-        }
-        .remediation-detail-priority {
-            border-radius: 999px;
-            font-size: 0.74rem;
-            font-weight: 700;
-            padding: 0.12rem 0.54rem;
-        }
-        .remediation-detail-metrics {
-            display: grid;
-            gap: 0.65rem;
-            grid-template-columns: repeat(4, minmax(0, 1fr));
-            margin-bottom: 1rem;
-        }
-        .remediation-detail-metrics div {
-            background: rgba(128,128,128,0.08);
-            border-radius: 8px;
-            padding: 0.8rem;
-        }
-        .remediation-detail-metrics small,
-        .remediation-detail-metrics strong {
-            display: block;
-        }
-        .remediation-detail-metrics small {
-            color: rgba(250,250,250,0.58);
-            margin-bottom: 0.2rem;
-        }
-        .remediation-detail-metrics strong {
-            font-size: 1.18rem;
-            font-variant-numeric: tabular-nums;
-        }
-        .remediation-detail-kev {
-            color: #ff5b61;
-        }
-        .remediation-top-cves {
-            margin-bottom: 0.45rem;
-        }
-        .remediation-cve-tags {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.42rem;
-        }
-        .remediation-cve-tag {
-            background: rgba(128,128,128,0.1);
-            border: 1px solid rgba(128,128,128,0.2);
-            border-radius: 6px;
-            font-family: monospace;
-            font-size: 0.78rem;
-            padding: 0.22rem 0.62rem;
-        }
-        @media (max-width: 700px) {
-            .remediation-detail-metrics {
-                grid-template-columns: repeat(2, minmax(0, 1fr));
+        st.markdown(
+            """
+            <style>
+            .remediation-target {
+                display: block;
+                height: 0;
+                scroll-margin-top: 1rem;
             }
+            .remediation-table-shell {
+                border: 1px solid rgba(128,128,128,0.24);
+                border-radius: 10px;
+                max-height: 420px;
+                overflow: auto;
+                margin: 0.5rem 0 1.25rem;
+            }
+            .remediation-table {
+                width: 100%;
+                min-width: 760px;
+                border-collapse: collapse;
+                font-size: 0.92rem;
+            }
+            .remediation-table th {
+                background: rgba(128,128,128,0.12);
+                color: rgba(250,250,250,0.72);
+                font-weight: 600;
+                padding: 0.75rem 0.7rem;
+                text-align: left;
+                white-space: nowrap;
+            }
+            .remediation-table td {
+                border-top: 1px solid rgba(128,128,128,0.2);
+                padding: 0;
+                vertical-align: middle;
+            }
+            .remediation-table td a {
+                color: inherit;
+                cursor: pointer;
+                display: block;
+                min-height: 2.85rem;
+                padding: 0.72rem 0.7rem;
+                text-decoration: none;
+            }
+            .remediation-row:hover {
+                background: rgba(28,131,225,0.08);
+            }
+            .remediation-number {
+                font-variant-numeric: tabular-nums;
+                text-align: right;
+            }
+            .remediation-kev {
+                color: #ff5b61;
+                font-weight: 600;
+            }
+            .remediation-badge {
+                border-radius: 999px;
+                display: inline-flex;
+                font-size: 0.82rem;
+                font-weight: 700;
+                justify-content: center;
+                min-width: 5.1rem;
+                padding: 0.24rem 0.68rem;
+            }
+            .remediation-score {
+                align-items: center;
+                display: grid;
+                gap: 0.6rem;
+                grid-template-columns: minmax(5.5rem, 1fr) auto;
+                font-variant-numeric: tabular-nums;
+            }
+            .remediation-score-track {
+                background: rgba(128,128,128,0.2);
+                border-radius: 999px;
+                display: block;
+                height: 0.42rem;
+                overflow: hidden;
+            }
+            .remediation-score-track span {
+                background: #378add;
+                border-radius: inherit;
+                display: block;
+                height: 100%;
+            }
+            .remediation-detail-card {
+                border: 1px solid rgba(128,128,128,0.2);
+                border-radius: 12px;
+                display: none;
+                margin-top: 0.5rem;
+                padding: 1rem 1.25rem;
+            }
+            .remediation-detail-head {
+                align-items: center;
+                border-bottom: 1px solid rgba(128,128,128,0.15);
+                display: flex;
+                gap: 0.75rem;
+                margin-bottom: 0.9rem;
+                padding-bottom: 0.9rem;
+            }
+            .remediation-initials {
+                align-items: center;
+                background: rgba(28,131,225,0.12);
+                border-radius: 8px;
+                color: rgb(28,131,225);
+                display: flex;
+                flex: 0 0 auto;
+                font-size: 0.84rem;
+                font-weight: 600;
+                height: 2.3rem;
+                justify-content: center;
+                width: 2.3rem;
+            }
+            .remediation-detail-title {
+                font-size: 0.96rem;
+                font-weight: 600;
+            }
+            .remediation-muted {
+                color: rgba(250,250,250,0.58);
+                font-size: 0.82rem;
+            }
+            .remediation-detail-priority {
+                border-radius: 999px;
+                font-size: 0.74rem;
+                font-weight: 700;
+                padding: 0.12rem 0.54rem;
+            }
+            .remediation-detail-metrics {
+                display: grid;
+                gap: 0.65rem;
+                grid-template-columns: repeat(4, minmax(0, 1fr));
+                margin-bottom: 1rem;
+            }
+            .remediation-detail-metrics div {
+                background: rgba(128,128,128,0.08);
+                border-radius: 8px;
+                padding: 0.8rem;
+            }
+            .remediation-detail-metrics small,
+            .remediation-detail-metrics strong {
+                display: block;
+            }
+            .remediation-detail-metrics small {
+                color: rgba(250,250,250,0.58);
+                margin-bottom: 0.2rem;
+            }
+            .remediation-detail-metrics strong {
+                font-size: 1.18rem;
+                font-variant-numeric: tabular-nums;
+            }
+            .remediation-detail-kev {
+                color: #ff5b61;
+            }
+            .remediation-top-cves {
+                margin-bottom: 0.45rem;
+            }
+            .remediation-cve-tags {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 0.42rem;
+            }
+            .remediation-cve-tag {
+                background: rgba(128,128,128,0.1);
+                border: 1px solid rgba(128,128,128,0.2);
+                border-radius: 6px;
+                font-family: monospace;
+                font-size: 0.78rem;
+                padding: 0.22rem 0.62rem;
+            }
+            @media (max-width: 700px) {
+                .remediation-detail-metrics {
+                    grid-template-columns: repeat(2, minmax(0, 1fr));
+                }
+            }
+            .remediation-picker:not(:has(.remediation-target:target)) .remediation-row-0 {
+                background: rgba(28,131,225,0.18);
+            }
+            .remediation-picker:not(:has(.remediation-target:target)) .remediation-detail-0 {
+                display: block;
+            }
+            """ + "\n".join(_selection_css) + """
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="remediation-picker">'
+            + "".join(_action_targets)
+            + '<div class="remediation-table-shell"><table class="remediation-table">'
+            '<thead><tr><th>#</th><th>Vendor</th><th>Product</th><th>CVEs</th>'
+            '<th>KEV</th><th>Max priority</th><th>Mean EPSS</th><th>Action score</th>'
+            '</tr></thead><tbody>'
+            + "".join(_table_rows)
+            + '</tbody></table></div><div class="remediation-details">'
+            + "".join(_detail_cards)
+            + "</div></div>",
+            unsafe_allow_html=True,
+        )
+
+    with strategy_tab:
+        st.caption(
+            "Top 50 vulnerabilities selected by each capacity strategy. "
+            "This view comes straight from the capacity simulation output."
+        )
+
+        _strategy_labels = {
+            "top_priority": "Top priority",
+            "high_epss": "High EPSS",
+            "cluster_based": "Cluster based",
+            "kev_first": "KEV first",
+            "hybrid": "Hybrid",
         }
-        .remediation-picker:not(:has(.remediation-target:target)) .remediation-row-0 {
-            background: rgba(28,131,225,0.18);
-        }
-        .remediation-picker:not(:has(.remediation-target:target)) .remediation-detail-0 {
-            display: block;
-        }
-        """ + "\n".join(_selection_css) + """
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        '<div class="remediation-picker">'
-        + "".join(_action_targets)
-        + '<div class="remediation-table-shell"><table class="remediation-table">'
-        '<thead><tr><th>#</th><th>Vendor</th><th>Product</th><th>CVEs</th>'
-        '<th>KEV</th><th>Max priority</th><th>Mean EPSS</th><th>Action score</th>'
-        '</tr></thead><tbody>'
-        + "".join(_table_rows)
-        + '</tbody></table></div><div class="remediation-details">'
-        + "".join(_detail_cards)
-        + "</div></div>",
-        unsafe_allow_html=True,
-    )
+
+        strategy = st.selectbox(
+            "Strategy",
+            list(_strategy_labels),
+            format_func=lambda value: _strategy_labels.get(value, value.replace("_", " ").title()),
+            key="rem_capacity_strategy",
+        )
+
+        recommendations = remediation_recommendations(strategy, top_n=50, snapshot_date=snapshot_date)
+        if _no_data(recommendations, "Capacity-strategy recommendations not yet generated."):
+            st.info("Capacity-strategy recommendations are not yet available for this snapshot.")
+        else:
+            summary = strategy_comparison(snapshot_date)
+            summary_row = summary[summary["strategy"] == strategy] if not summary.empty else pd.DataFrame()
+
+            if not summary_row.empty:
+                row = summary_row.iloc[0]
+                kev_coverage = float(row.get("kev_coverage", 0) or 0)
+                epss_mitigated = float(row.get("epss_expected_mitigated", 0) or 0)
+                cluster_diversity = float(row.get("cluster_diversity", 0) or 0)
+                selected_count = int(row.get("n_selected", 0) or 0)
+
+                def _strategy_card(title: str, value: str, subtitle: str, accent: str) -> str:
+                    return f"""
+<div style="border:1px solid rgba(128,128,128,0.2);border-radius:14px;padding:14px 15px;background:var(--background-color);box-shadow:0 1px 0 rgba(0,0,0,0.04);">
+  <div style="font-size:12px;letter-spacing:.02em;text-transform:uppercase;color:gray;margin-bottom:8px;">{escape(title)}</div>
+  <div style="font-size:1.45rem;font-weight:700;line-height:1.1;color:{accent};margin-bottom:6px;">{escape(value)}</div>
+  <div style="font-size:12px;color:gray;">{escape(subtitle)}</div>
+</div>
+"""
+
+                _metric_grid = (
+                    '<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:0.5rem 0 1.1rem;">'
+                    + _strategy_card("KEV coverage", f"{kev_coverage:.0%}", "Share of KEV CVEs captured by the strategy", "#d14b4b")
+                    + _strategy_card("EPSS mitigated", f"{epss_mitigated:.2f}", "Cumulative EPSS score selected", "#00a3a3")
+                    + _strategy_card("Cluster diversity", f"{cluster_diversity:.2f}", "Entropy-style spread across clusters", "#7d7dff")
+                    + _strategy_card("Selected CVEs", f"{selected_count:,}", "Rows selected under the current capacity", "#cc7a00")
+                    + '</div>'
+                )
+                st.markdown(_metric_grid, unsafe_allow_html=True)
+            else:
+                st.info("Strategy summary metrics are not yet available for this snapshot.")
+
+            display_cols = [c for c in [
+                "cve_id",
+                "priority_score_final",
+                "epss_score",
+                "is_kev",
+                "cvss_score",
+                "cluster_id",
+                "primary_vendor",
+                "primary_product",
+            ] if c in recommendations.columns]
+            export_cols = [c for c in [
+                *display_cols,
+                "priority_level_final",
+                "cvss_severity",
+            ] if c in recommendations.columns]
+
+            export_name = f"capacity_strategy_{strategy}_{snapshot_date or 'latest'}.csv"
+            st.download_button(
+                "Export CSV",
+                data=recommendations[export_cols].to_csv(index=False).encode("utf-8"),
+                file_name=export_name,
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+            max_priority_score = float(recommendations["priority_score_final"].max() or 1.0) if "priority_score_final" in recommendations.columns else 1.0
+
+            def _fmt_cell(value, digits: int = 2) -> str:
+                try:
+                    return f"{float(value):.{digits}f}"
+                except (TypeError, ValueError):
+                    return "—"
+
+            _P_COLOR = {"Critical": "#c0282a", "High": "#c96e00",
+                        "Medium": "#a07d00", "Low": "#1d831d"}
+            _P_BG = {
+                "Critical": "rgba(214,39,40,0.16)",
+                "High": "rgba(255,127,14,0.16)",
+                "Medium": "rgba(200,155,0,0.16)",
+                "Low": "rgba(44,160,44,0.16)",
+            }
+
+            _rows_html = []
+            for idx, row in recommendations.reset_index(drop=True).iterrows():
+                cve_id = escape(str(row.get("cve_id", "") or ""))
+                priority_score = float(row.get("priority_score_final", 0) or 0)
+                epss_score = float(row.get("epss_score", 0) or 0)
+                is_kev = int(row.get("is_kev", 0) or 0)
+                cvss_score = _fmt_cell(row.get("cvss_score"), 1)
+                cluster_id = row.get("cluster_id")
+                cluster_text = "—" if pd.isna(cluster_id) else str(int(cluster_id))
+                vendor = escape(str(row.get("primary_vendor", "") or "—"))
+                product = escape(str(row.get("primary_product", "") or "—"))
+                priority_level = str(row.get("priority_level_final") or "")
+                priority_color = _P_COLOR.get(priority_level, "gray")
+                priority_bg = _P_BG.get(priority_level, "rgba(128,128,128,0.12)")
+                kev_badge = (
+                    '<span style="display:inline-flex;align-items:center;padding:0.22rem 0.55rem;'
+                    'border-radius:999px;background:rgba(255,91,97,0.14);color:#ff5b61;'
+                    'font-size:12px;font-weight:700;">KEV</span>'
+                    if is_kev == 1
+                    else '<span style="display:inline-flex;align-items:center;padding:0.22rem 0.55rem;'
+                         'border-radius:999px;background:rgba(128,128,128,0.12);color:rgba(250,250,250,0.62);'
+                         'font-size:12px;font-weight:700;">No</span>'
+                )
+                priority_fill = max(0.0, min(100.0, 100.0 * priority_score / max_priority_score)) if max_priority_score else 0.0
+                _rows_html.append(
+                    f"""
+<tr class="remediation-row">
+  <td class="remediation-number">{idx + 1}</td>
+  <td><strong>{cve_id}</strong></td>
+  <td>
+    <span class="remediation-badge" style="min-width:4.9rem;color:{priority_color};background:{priority_bg};">
+      {escape(priority_level or _priority_label(priority_score))}
+    </span>
+  </td>
+  <td class="remediation-number">{epss_score:.2f}</td>
+  <td>{kev_badge}</td>
+  <td class="remediation-number">{cvss_score}</td>
+  <td class="remediation-number">{cluster_text}</td>
+  <td>{vendor}</td>
+  <td>{product}</td>
+  <td>
+    <div style="display:grid;gap:0.25rem;grid-template-columns:minmax(4.5rem, 1fr) auto;align-items:center;">
+      <div style="background:rgba(128,128,128,0.2);height:0.4rem;border-radius:999px;overflow:hidden;">
+        <div style="width:{priority_fill:.1f}%;height:100%;background:#378add;border-radius:inherit;"></div>
+      </div>
+      <span style="font-variant-numeric:tabular-nums;">{priority_score:.2f}</span>
+    </div>
+  </td>
+</tr>
+"""
+                )
+
+            st.markdown(
+                '<style>'
+                '.strategy-table-shell {'
+                '  border: 1px solid rgba(128,128,128,0.24);'
+                '  border-radius: 14px;'
+                '  max-height: 420px;'
+                '  overflow: auto;'
+                '  margin-top: 0.75rem;'
+                '}'
+                '.strategy-table {'
+                '  width: 100%;'
+                '  min-width: 760px;'
+                '  border-collapse: collapse;'
+                '  font-size: 0.92rem;'
+                '}'
+                '.strategy-table thead th {'
+                '  background: rgba(128,128,128,0.12);'
+                '  color: rgba(250,250,250,0.72);'
+                '  padding: 0.82rem 0.7rem;'
+                '  text-align: left;'
+                '  white-space: nowrap;'
+                '  font-weight: 600;'
+                '}'
+                '.strategy-table tbody td {'
+                '  border-top: 1px solid rgba(128,128,128,0.16);'
+                '  padding: 0.72rem 0.7rem;'
+                '  vertical-align: middle;'
+                '}'
+                '.strategy-table tbody tr:hover {'
+                '  background: rgba(28,131,225,0.08);'
+                '}'
+                '.strategy-number {'
+                '  text-align: right;'
+                '  font-variant-numeric: tabular-nums;'
+                '}'
+                '</style>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                '<div class="strategy-table-shell"><table class="strategy-table">'
+                '<thead><tr>'
+                '<th>#</th>'
+                '<th>CVE</th>'
+                '<th>Priority band</th>'
+                '<th>EPSS</th>'
+                '<th>KEV</th>'
+                '<th>CVSS</th>'
+                '<th>Cluster</th>'
+                '<th>Vendor</th>'
+                '<th>Product</th>'
+                '<th>Priority score</th>'
+                '</tr></thead><tbody>'
+                + "".join(_rows_html)
+                + '</tbody></table></div>',
+                unsafe_allow_html=True,
+            )

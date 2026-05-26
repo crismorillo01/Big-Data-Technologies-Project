@@ -23,12 +23,21 @@ from src.config import (
     GOLD_CLUSTER_TOPICS_DIR,
     GOLD_DATA_QUALITY_DIR,
     GOLD_REMEDIATION_ACTIONS_DIR,
+    GOLD_REMEDIATION_RECOMMENDATIONS_DIR,
     GOLD_SIMULATION_TIMESERIES_DIR,
     GOLD_STRATEGY_COMPARISON_DIR,
     GOLD_VULN_SCORES_FINAL_DIR,
 )
 
 _log = logging.getLogger(__name__)
+
+_CAPACITY_STRATEGIES = {
+    "top_priority",
+    "high_epss",
+    "cluster_based",
+    "kev_first",
+    "hybrid",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +237,40 @@ def strategy_comparison(snapshot_date: str | None = None) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Remediation actions
 # ---------------------------------------------------------------------------
+
+def remediation_recommendations(
+    strategy: str,
+    top_n: int = 50,
+    snapshot_date: str | None = None,
+) -> pd.DataFrame:
+    """Return the top-N vulnerabilities selected by one capacity strategy."""
+    if strategy not in _CAPACITY_STRATEGIES:
+        _log.warning("Unknown remediation strategy requested: %s", strategy)
+        return pd.DataFrame()
+
+    base_dir = GOLD_REMEDIATION_RECOMMENDATIONS_DIR / strategy
+    actual = _resolve_snapshot(base_dir, snapshot_date)
+    if not actual:
+        return pd.DataFrame()
+
+    glob = _glob(base_dir)
+    order_clause = {
+        "top_priority": "priority_score_final DESC, epss_score DESC, cve_id ASC",
+        "high_epss": "epss_score DESC, priority_score_final DESC, cve_id ASC",
+        "cluster_based": "priority_score_final DESC, is_kev DESC, epss_score DESC, cve_id ASC",
+        "kev_first": "is_kev DESC, priority_score_final DESC, epss_score DESC, cve_id ASC",
+        "hybrid": "is_kev DESC, priority_score_final DESC, epss_score DESC, cve_id ASC",
+    }[strategy]
+
+    sql = f"""
+        SELECT *
+        FROM read_parquet('{glob}', hive_partitioning=true, union_by_name=true)
+        WHERE CAST(snapshot_date AS VARCHAR) LIKE ?
+        ORDER BY {order_clause}
+        LIMIT {int(top_n)}
+    """
+    return query_parquet(sql, [f"{actual}%"])
+
 
 def remediation_actions(
     top_n: int = 50,
