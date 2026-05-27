@@ -1457,11 +1457,15 @@ elif page == "Remediation Plan":
                 display: block;
                 height: 100%;
             }
+            .remediation-table-divider {
+                border-top: 1px solid rgba(128,128,128,0.28);
+                margin: 1.15rem 0 0.95rem;
+            }
             .remediation-detail-card {
                 border: 1px solid rgba(128,128,128,0.2);
                 border-radius: 12px;
                 display: none;
-                margin-top: 0.5rem;
+                margin-top: 0.9rem;
                 padding: 1rem 1.25rem;
             }
             .remediation-detail-head {
@@ -1565,7 +1569,7 @@ elif page == "Remediation Plan":
             '<th>KEV</th><th>Max priority</th><th>Mean EPSS</th><th>Action score</th>'
             '</tr></thead><tbody>'
             + "".join(_table_rows)
-            + '</tbody></table></div><div class="remediation-details">'
+            + '</tbody></table></div><div class="remediation-table-divider"></div><div class="remediation-details">'
             + "".join(_detail_cards)
             + "</div></div>",
             unsafe_allow_html=True,
@@ -1669,8 +1673,87 @@ elif page == "Remediation Plan":
                 "Low": "rgba(44,160,44,0.16)",
             }
 
+            def _strategy_detail_card(row: pd.Series, idx: int) -> str:
+                cve_id = str(row.get("cve_id", "") or "")
+                level = str(row.get("priority_level_final") or "")
+                score_val = row.get("priority_score_final")
+                score_str = f"{float(score_val):.1f}" if score_val is not None and pd.notna(score_val) else "—"
+                cvss_val = row.get("cvss_score")
+                cvss_str = f"{float(cvss_val):.1f}" if cvss_val is not None and pd.notna(cvss_val) else "—"
+                epss_val = row.get("epss_score")
+                epss_str = f"{float(epss_val):.3f}" if epss_val is not None and pd.notna(epss_val) else "—"
+                vendor = str(row.get("primary_vendor") or "—")
+                product = str(row.get("primary_product") or "—")
+                published_val = row.get("published")
+                published = str(published_val)[:10] if published_val is not None and pd.notna(published_val) else "—"
+                is_kev = row.get("is_kev") == 1
+                description_val = row.get("description")
+                action_val = row.get("kev_required_action")
+                desc_html = (
+                    '<div style="padding-top:12px;margin-top:12px;'
+                    'border-top:0.5px solid rgba(49,51,63,0.08);'
+                    'font-size:13px;line-height:1.7;">'
+                    + escape(str(description_val))
+                    + "</div>"
+                ) if description_val is not None and pd.notna(description_val) and str(description_val).strip() else ""
+
+                action_html = (
+                    '<div style="margin-top:10px;padding:10px 14px;background:#FCEBEB;'
+                    'border-radius:8px;font-size:13px;color:#A32D2D;">'
+                    '<strong>Required action:</strong> '
+                    + escape(str(action_val))
+                    + "</div>"
+                ) if action_val is not None and pd.notna(action_val) and str(action_val).strip() else ""
+
+                _LEVEL_STYLE = {
+                    "Critical": ("background:#FCEBEB;color:#A32D2D;", "#A32D2D"),
+                    "High":     ("background:#FAEEDA;color:#854F0B;", "#854F0B"),
+                    "Medium":   ("background:#FFF8E1;color:#6D4C0B;", "#6D4C0B"),
+                    "Low":      ("background:#EAF3DE;color:#3B6D11;", "#3B6D11"),
+                }
+                badge_style, score_color = _LEVEL_STYLE.get(
+                    level, ("background:#F1EFE8;color:#5F5E5A;", "#5F5E5A"))
+                level_badge = (
+                    f'<span style="{badge_style}padding:3px 10px;border-radius:12px;'
+                    f'font-size:12px;font-weight:500;">{level}</span>'
+                ) if level else ""
+                kev_badge = (
+                    '<span style="background:#FCEBEB;border:0.5px solid #F09595;color:#A32D2D;'
+                    'padding:3px 10px;border-radius:12px;font-size:12px;font-weight:500;">⚠️ CISA KEV</span>'
+                ) if is_kev else ""
+
+                return f"""
+<section class="strategy-detail-card strategy-detail-{idx}">
+  <div class="remediation-detail-head">
+    <div class="remediation-initials">{escape((cve_id[:2] or "??").upper())}</div>
+    <div>
+      <div class="remediation-detail-title">{escape(cve_id)}</div>
+      <div class="remediation-muted">{escape(vendor)} &nbsp;·&nbsp; {escape(product)} &nbsp;·&nbsp;
+        <span class="remediation-detail-priority" style="background:{_P_BG.get(level, 'rgba(128,128,128,0.1)')};color:{_P_COLOR.get(level, 'gray')};">{level or 'Unknown'}</span>
+      </div>
+    </div>
+  </div>
+  <div class="remediation-detail-metrics">
+    <div><small>Priority score</small><strong style="color:{score_color};">{score_str}</strong></div>
+    <div><small>CVSS score</small><strong>{cvss_str}</strong><small>{row.get("cvss_severity", "")}</small></div>
+    <div><small>EPSS score</small><strong style="color:#185FA5;">{epss_str}</strong></div>
+    <div><small>Published</small><strong>{published}</strong></div>
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+    {level_badge}
+    {kev_badge}
+  </div>
+  {desc_html}
+  {action_html}
+</section>
+"""
+
             _rows_html = []
+            _strategy_targets = []
+            _strategy_details = []
+            _strategy_selection_css = []
             for idx, row in recommendations.reset_index(drop=True).iterrows():
+                control_id = f"strategy-action-{idx}"
                 cve_id = escape(str(row.get("cve_id", "") or ""))
                 priority_score = float(row.get("priority_score_final", 0) or 0)
                 epss_score = float(row.get("epss_score", 0) or 0)
@@ -1684,83 +1767,256 @@ elif page == "Remediation Plan":
                 priority_color = _P_COLOR.get(priority_level, "gray")
                 priority_bg = _P_BG.get(priority_level, "rgba(128,128,128,0.12)")
                 kev_badge = (
-                    '<span style="display:inline-flex;align-items:center;padding:0.22rem 0.55rem;'
-                    'border-radius:999px;background:rgba(255,91,97,0.14);color:#ff5b61;'
-                    'font-size:12px;font-weight:700;">KEV</span>'
+                    f'<span class="strategy-kev-badge">KEV</span>'
                     if is_kev == 1
-                    else '<span style="display:inline-flex;align-items:center;padding:0.22rem 0.55rem;'
-                         'border-radius:999px;background:rgba(128,128,128,0.12);color:rgba(250,250,250,0.62);'
-                         'font-size:12px;font-weight:700;">No</span>'
+                    else '<span class="strategy-kev-muted">—</span>'
                 )
                 priority_fill = max(0.0, min(100.0, 100.0 * priority_score / max_priority_score)) if max_priority_score else 0.0
+                _strategy_targets.append(
+                    f'<span class="strategy-target" id="{control_id}"></span>'
+                )
+                _strategy_details.append(_strategy_detail_card(row, idx))
+                _strategy_selection_css.append(
+                    f'#{control_id}:target ~ .strategy-table-shell .strategy-row-{idx}'
+                    ' { background: rgba(28,131,225,0.18); }'
+                )
+                _strategy_selection_css.append(
+                    f'#{control_id}:target ~ .strategy-details .strategy-detail-{idx}'
+                    ' { display: block; }'
+                )
                 _rows_html.append(
                     f"""
-<tr class="remediation-row">
-  <td class="remediation-number">{idx + 1}</td>
-  <td><strong>{cve_id}</strong></td>
-  <td>
-    <span class="remediation-badge" style="min-width:4.9rem;color:{priority_color};background:{priority_bg};">
+<tr class="strategy-row strategy-row-{idx}">
+  <td class="strategy-number"><a href="#{control_id}">{idx + 1}</a></td>
+  <td><a href="#{control_id}"><strong>{cve_id}</strong></a></td>
+  <td><a href="#{control_id}">
+    <span class="strategy-badge" style="min-width:4.9rem;color:{priority_color};background:{priority_bg};">
       {escape(priority_level or _priority_label(priority_score))}
     </span>
-  </td>
-  <td class="remediation-number">{epss_score:.2f}</td>
-  <td>{kev_badge}</td>
-  <td class="remediation-number">{cvss_score}</td>
-  <td class="remediation-number">{cluster_text}</td>
-  <td>{vendor}</td>
-  <td>{product}</td>
-  <td>
-    <div style="display:grid;gap:0.25rem;grid-template-columns:minmax(4.5rem, 1fr) auto;align-items:center;">
-      <div style="background:rgba(128,128,128,0.2);height:0.4rem;border-radius:999px;overflow:hidden;">
-        <div style="width:{priority_fill:.1f}%;height:100%;background:#378add;border-radius:inherit;"></div>
-      </div>
-      <span style="font-variant-numeric:tabular-nums;">{priority_score:.2f}</span>
-    </div>
-  </td>
+  </a></td>
+  <td class="strategy-number"><a href="#{control_id}">{epss_score:.2f}</a></td>
+  <td><a href="#{control_id}">{kev_badge}</a></td>
+  <td class="strategy-number"><a href="#{control_id}">{cvss_score}</a></td>
+  <td class="strategy-number"><a href="#{control_id}">{cluster_text}</a></td>
+  <td><a href="#{control_id}">{vendor}</a></td>
+  <td><a href="#{control_id}">{product}</a></td>
+  <td><a href="#{control_id}">
+    <span class="strategy-score">
+      <span class="strategy-score-track">
+        <span style="width:{priority_fill:.1f}%"></span>
+      </span>
+      <span>{priority_score:.2f}</span>
+    </span>
+  </a></td>
 </tr>
 """
                 )
 
             st.markdown(
-                '<style>'
-                '.strategy-table-shell {'
-                '  border: 1px solid rgba(128,128,128,0.24);'
-                '  border-radius: 14px;'
-                '  max-height: 420px;'
-                '  overflow: auto;'
-                '  margin-top: 0.75rem;'
-                '}'
-                '.strategy-table {'
-                '  width: 100%;'
-                '  min-width: 760px;'
-                '  border-collapse: collapse;'
-                '  font-size: 0.92rem;'
-                '}'
-                '.strategy-table thead th {'
-                '  background: rgba(128,128,128,0.12);'
-                '  color: rgba(250,250,250,0.72);'
-                '  padding: 0.82rem 0.7rem;'
-                '  text-align: left;'
-                '  white-space: nowrap;'
-                '  font-weight: 600;'
-                '}'
-                '.strategy-table tbody td {'
-                '  border-top: 1px solid rgba(128,128,128,0.16);'
-                '  padding: 0.72rem 0.7rem;'
-                '  vertical-align: middle;'
-                '}'
-                '.strategy-table tbody tr:hover {'
-                '  background: rgba(28,131,225,0.08);'
-                '}'
-                '.strategy-number {'
-                '  text-align: right;'
-                '  font-variant-numeric: tabular-nums;'
-                '}'
-                '</style>',
+                (
+                    '<style>'
+                    '.strategy-target {'
+                    '  display: block;'
+                    '  height: 0;'
+                    '  scroll-margin-top: 1rem;'
+                    '}'
+                    '.strategy-table-shell {'
+                    '  border: 1px solid rgba(128,128,128,0.24);'
+                    '  border-radius: 14px;'
+                    '  max-height: 420px;'
+                    '  overflow: auto;'
+                    '  margin-top: 0.75rem;'
+                    '}'
+                    '.strategy-table {'
+                    '  width: 100%;'
+                    '  min-width: 760px;'
+                    '  border-collapse: collapse;'
+                    '  font-size: 0.92rem;'
+                    '}'
+                    '.strategy-table thead th {'
+                    '  background: rgba(128,128,128,0.12);'
+                    '  color: rgba(250,250,250,0.72);'
+                    '  padding: 0.82rem 0.7rem;'
+                    '  text-align: left;'
+                    '  white-space: nowrap;'
+                    '  font-weight: 600;'
+                    '}'
+                    '.strategy-table tbody td {'
+                    '  border-top: 1px solid rgba(128,128,128,0.16);'
+                    '  padding: 0;'
+                    '  vertical-align: middle;'
+                    '}'
+                    '.strategy-table tbody tr:hover {'
+                    '  background: rgba(28,131,225,0.08);'
+                    '}'
+                    '.strategy-table td a {'
+                    '  color: inherit;'
+                    '  cursor: pointer;'
+                    '  display: block;'
+                    '  min-height: 2.85rem;'
+                    '  padding: 0.72rem 0.7rem;'
+                    '  text-decoration: none;'
+                    '}'
+                    '.strategy-number {'
+                    '  font-variant-numeric: tabular-nums;'
+                    '  text-align: right;'
+                    '}'
+                    '.strategy-kev {'
+                    '  color: #ff5b61;'
+                    '  font-weight: 600;'
+                    '}'
+                    '.strategy-kev-badge {'
+                    '  align-items: center;'
+                    '  background: rgba(255,91,97,0.14);'
+                    '  border-radius: 999px;'
+                    '  color: #ff5b61;'
+                    '  display: inline-flex;'
+                    '  font-size: 0.82rem;'
+                    '  font-weight: 700;'
+                    '  justify-content: center;'
+                    '  min-width: 2.2rem;'
+                    '  padding: 0.24rem 0.68rem;'
+                    '}'
+                    '.strategy-kev-muted {'
+                    '  color: rgba(250,250,250,0.58);'
+                    '}'
+                    '.strategy-badge {'
+                    '  border-radius: 999px;'
+                    '  display: inline-flex;'
+                    '  font-size: 0.82rem;'
+                    '  font-weight: 700;'
+                    '  justify-content: center;'
+                    '  min-width: 5.1rem;'
+                    '  padding: 0.24rem 0.68rem;'
+                    '}'
+                    '.strategy-score {'
+                    '  align-items: center;'
+                    '  display: grid;'
+                    '  gap: 0.6rem;'
+                    '  grid-template-columns: minmax(5.5rem, 1fr) auto;'
+                    '  font-variant-numeric: tabular-nums;'
+                    '}'
+                    '.strategy-score-track {'
+                    '  background: rgba(128,128,128,0.2);'
+                    '  border-radius: 999px;'
+                    '  display: block;'
+                    '  height: 0.42rem;'
+                    '  overflow: hidden;'
+                    '}'
+                    '.strategy-score-track span {'
+                    '  background: #378add;'
+                    '  border-radius: inherit;'
+                    '  display: block;'
+                    '  height: 100%;'
+                    '}'
+                    '.strategy-table-divider {'
+                    '  border-top: 1px solid rgba(128,128,128,0.28);'
+                    '  margin: 1.15rem 0 0.95rem;'
+                    '}'
+                    '.strategy-detail-card {'
+                    '  border: 1px solid rgba(128,128,128,0.2);'
+                    '  border-radius: 12px;'
+                    '  display: none;'
+                    '  margin-top: 0.9rem;'
+                    '  padding: 1rem 1.25rem;'
+                    '}'
+                    '.strategy-detail-head {'
+                    '  align-items: center;'
+                    '  border-bottom: 1px solid rgba(128,128,128,0.15);'
+                    '  display: flex;'
+                    '  gap: 0.75rem;'
+                    '  margin-bottom: 0.9rem;'
+                    '  padding-bottom: 0.9rem;'
+                    '}'
+                    '.strategy-initials {'
+                    '  align-items: center;'
+                    '  background: rgba(28,131,225,0.12);'
+                    '  border-radius: 8px;'
+                    '  color: rgb(28,131,225);'
+                    '  display: flex;'
+                    '  flex: 0 0 auto;'
+                    '  font-size: 0.84rem;'
+                    '  font-weight: 600;'
+                    '  height: 2.3rem;'
+                    '  justify-content: center;'
+                    '  width: 2.3rem;'
+                    '}'
+                    '.strategy-detail-title {'
+                    '  font-size: 0.96rem;'
+                    '  font-weight: 600;'
+                    '}'
+                    '.strategy-muted {'
+                    '  color: rgba(250,250,250,0.58);'
+                    '  font-size: 0.82rem;'
+                    '}'
+                    '.strategy-detail-priority {'
+                    '  border-radius: 999px;'
+                    '  font-size: 0.74rem;'
+                    '  font-weight: 700;'
+                    '  padding: 0.12rem 0.54rem;'
+                    '}'
+                    '.strategy-detail-metrics {'
+                    '  display: grid;'
+                    '  gap: 0.65rem;'
+                    '  grid-template-columns: repeat(4, minmax(0, 1fr));'
+                    '  margin-bottom: 1rem;'
+                    '}'
+                    '.strategy-detail-metrics div {'
+                    '  background: rgba(128,128,128,0.08);'
+                    '  border-radius: 8px;'
+                    '  padding: 0.8rem;'
+                    '}'
+                    '.strategy-detail-metrics small,'
+                    '.strategy-detail-metrics strong {'
+                    '  display: block;'
+                    '}'
+                    '.strategy-detail-metrics small {'
+                    '  color: rgba(250,250,250,0.58);'
+                    '  margin-bottom: 0.2rem;'
+                    '}'
+                    '.strategy-detail-metrics strong {'
+                    '  font-size: 1.18rem;'
+                    '  font-variant-numeric: tabular-nums;'
+                    '}'
+                    '.strategy-detail-kev {'
+                    '  color: #ff5b61;'
+                    '}'
+                    '.strategy-top-cves {'
+                    '  margin-bottom: 0.45rem;'
+                    '}'
+                    '.strategy-cve-tags {'
+                    '  display: flex;'
+                    '  flex-wrap: wrap;'
+                    '  gap: 0.42rem;'
+                    '}'
+                    '.strategy-cve-tag {'
+                    '  background: rgba(128,128,128,0.1);'
+                    '  border: 1px solid rgba(128,128,128,0.2);'
+                    '  border-radius: 6px;'
+                    '  font-family: monospace;'
+                    '  font-size: 0.78rem;'
+                    '  padding: 0.22rem 0.62rem;'
+                    '}'
+                    '@media (max-width: 700px) {'
+                    '  .strategy-detail-metrics {'
+                    '    grid-template-columns: repeat(2, minmax(0, 1fr));'
+                    '  }'
+                    '}'
+                    '.strategy-picker:not(:has(.strategy-target:target)) .strategy-row-0 {'
+                    '  background: rgba(28,131,225,0.18);'
+                    '}'
+                    '.strategy-picker:not(:has(.strategy-target:target)) .strategy-detail-0 {'
+                    '  display: block;'
+                    '}'
+                    + "\n".join(_strategy_selection_css)
+                    + '</style>'
+                ),
                 unsafe_allow_html=True,
             )
             st.markdown(
-                '<div class="strategy-table-shell"><table class="strategy-table">'
+                '<div class="strategy-picker">'
+                + "".join(_strategy_targets)
+                + '<div class="strategy-table-shell"><table class="strategy-table">'
                 '<thead><tr>'
                 '<th>#</th>'
                 '<th>CVE</th>'
@@ -1774,6 +2030,8 @@ elif page == "Remediation Plan":
                 '<th>Priority score</th>'
                 '</tr></thead><tbody>'
                 + "".join(_rows_html)
-                + '</tbody></table></div>',
+                + '</tbody></table></div><div class="strategy-table-divider"></div><div class="strategy-details">'
+                + "".join(_strategy_details)
+                + "</div></div>",
                 unsafe_allow_html=True,
             )
