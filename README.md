@@ -153,6 +153,13 @@ All three are public, free and stable.
 
 ## Running the pipeline
 
+### Clone the repository
+
+```bash
+git clone <repo>
+cd Big-Data-Technologies-Project
+```
+
 ### Prerequisites
 
 - Python 3.10 or 3.11
@@ -161,52 +168,6 @@ All three are public, free and stable.
 - ~2 GB disk for raw + silver + gold across a 12-year window
 - Docker Desktop or Docker Engine with Docker Compose v2, if you want to
   use the containerized workflow instead of running locally
-
-### Setup
-
-```bash
-git clone <repo>
-cd Big-Data-Technologies-Project
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-### One command, end to end
-
-```bash
-python src/pipeline/daily_pipeline.py
-```
-
-That runs every step in order. The pipeline also accepts these arguments:
-
-| Argument | Default | Example | What it does |
-|---|---|---|---|
-| `--years` | `2015 2016 2017 2018 2019 2020 2021 2022 2023 2024 2025 2026` | `python src/pipeline/daily_pipeline.py --years 2024 2025 2026` | Limits the NVD ingestion window to the listed years. Useful for smaller, faster runs. |
-| `--daily-capacity` | `50` | `python src/pipeline/daily_pipeline.py --daily-capacity 30` | Sets how many vulnerabilities the capacity simulator assumes can be remediated per day. |
-| `--simulation-days` | `30` | `python src/pipeline/daily_pipeline.py --simulation-days 60` | Controls how many days the multi-day simulation should cover. |
-| `--driver-memory` | `3g` | `python src/pipeline/daily_pipeline.py --driver-memory 2g` | Sets the Spark driver heap passed to every step. Lower it on machines with limited RAM. |
-| `--snapshot-date` | `today UTC` | `python src/pipeline/daily_pipeline.py --snapshot-date 2026-05-10` | Forces the gold-layer snapshot date used by the downstream jobs. |
-| `--full-nvd-refresh` | `off` | `python src/pipeline/daily_pipeline.py --full-nvd-refresh` | Re-downloads every yearly NVD feed instead of using the incremental modified feed. |
-| `--nvd-storage` | `delta` | `python src/pipeline/daily_pipeline.py --nvd-storage parquet` | Chooses the storage format for NVD silver output. Use `delta` for the current default flow or `parquet` for legacy mode. |
-
-### Running a single step
-
-Every script is independently runnable via `spark-submit`:
-
-```bash
-spark-submit src/ingestion/ingest_nvd.py --years 2025 2026
-spark-submit src/processing/join_master.py
-```
-
-### The Streamlit app
-
-```bash
-streamlit run app/streamlit_app.py
-```
-
-Opens at `http://localhost:8501` with five pages: Overview, Vulnerability
-Explorer, Cluster View, Capacity Simulator, Remediation Plan.
 
 ### Running with Docker Compose
 
@@ -238,9 +199,17 @@ Run the pipeline on demand:
 docker compose run --rm pipeline
 ```
 
-Any `daily_pipeline.py` argument can be passed after `pipeline`, for
-example `--driver-memory`, `--snapshot-date`, `--full-nvd-refresh`, and
-`--nvd-storage`.
+The pipeline also accepts these arguments:
+
+| Argument | Default | Example | What it does |
+|---|---|---|---|
+| `--years` | `2015 2016 2017 2018 2019 2020 2021 2022 2023 2024 2025 2026` | `docker compose run --rm pipeline --years 2024 2025 2026` | Limits the NVD ingestion window to the listed years. Useful for smaller, faster runs. |
+| `--daily-capacity` | `50` | `docker compose run --rm pipeline --daily-capacity 30` | Sets how many vulnerabilities the capacity simulator assumes can be remediated per day. |
+| `--simulation-days` | `30` | `docker compose run --rm pipeline --simulation-days 60` | Controls how many days the multi-day simulation should cover. |
+| `--driver-memory` | `3g` | `docker compose run --rm pipeline --driver-memory 2g` | Sets the Spark driver heap passed to every step. Lower it on machines with limited RAM. |
+| `--snapshot-date` | `today UTC` | `docker compose run --rm pipeline --snapshot-date 2026-05-10` | Forces the gold-layer snapshot date used by the downstream jobs. |
+| `--full-nvd-refresh` | `off` | `docker compose run --rm pipeline --full-nvd-refresh` | Re-downloads every yearly NVD feed instead of using the incremental modified feed. |
+| `--nvd-storage` | `delta` | `docker compose run --rm pipeline --nvd-storage parquet` | Chooses the storage format for NVD silver output. Use `delta` for the current default flow or `parquet` for legacy mode. |
 
 Both services reuse the same image and persist outputs under `./data`.
 The app is available at `http://localhost:8501`.
@@ -249,6 +218,43 @@ To stop Docker Compose:
 
 - If you launched it in the foreground, press `Ctrl+C`.
 - If you launched it in detached mode, run `docker compose down`.
+
+### Local CLI setup
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### One command, end to end
+
+```bash
+python src/pipeline/daily_pipeline.py
+```
+
+That runs every step in order. The pipeline also accepts the same
+arguments as Docker Compose, so you can pass `--driver-memory`,
+`--snapshot-date`, `--full-nvd-refresh`, `--nvd-storage`, and the rest
+directly to `python src/pipeline/daily_pipeline.py`.
+
+### Running a single step
+
+Every script is independently runnable via `spark-submit`:
+
+```bash
+spark-submit src/ingestion/ingest_nvd.py --years 2025 2026
+spark-submit src/processing/join_master.py
+```
+
+### The Streamlit app
+
+```bash
+streamlit run app/streamlit_app.py
+```
+
+Opens at `http://localhost:8501` with five pages: Overview, Vulnerability
+Explorer, Cluster View, Capacity Simulator, Remediation Plan.
 
 ### Running with Docker Directly
 
@@ -290,15 +296,6 @@ EDITOR=nano crontab -e
 
 You can schedule the pipeline in two ways:
 
-- **Local Python environment**
-
-  Replace the placeholder paths with the absolute paths on the machine
-  that will run the job:
-
-  ```cron
-  0 20 * * * export JAVA_HOME=/absolute/path/to/java && export PATH=/absolute/path/to/java/bin:/absolute/path/to/Big-Data-Technologies-Project/.venv/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin && cd /absolute/path/to/Big-Data-Technologies-Project && ./.venv/bin/python src/pipeline/daily_pipeline.py >> logs/daily_pipeline.log 2>&1
-  ```
-
 - **Docker / Docker Compose**
 
   This version uses the image defined in `Dockerfile` and the service
@@ -311,6 +308,15 @@ You can schedule the pipeline in two ways:
 
   ```cron
   0 20 * * * export PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin && cd /absolute/path/to/Big-Data-Technologies-Project && docker compose run --rm pipeline >> /absolute/path/to/Big-Data-Technologies-Project/logs/daily_pipeline.log 2>&1
+  ```
+
+- **Local Python environment**
+
+  Replace the placeholder paths with the absolute paths on the machine
+  that will run the job:
+
+  ```cron
+  0 20 * * * export JAVA_HOME=/absolute/path/to/java && export PATH=/absolute/path/to/java/bin:/absolute/path/to/Big-Data-Technologies-Project/.venv/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin && cd /absolute/path/to/Big-Data-Technologies-Project && ./.venv/bin/python src/pipeline/daily_pipeline.py >> logs/daily_pipeline.log 2>&1
   ```
 
 Cron only runs while the computer is awake.
