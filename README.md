@@ -17,14 +17,14 @@ remediation capacity.
 │   app service → Streamlit on port 8501                             │
 │   pipeline service → daily_pipeline.py with forwarded CLI args     │
 └────────────────────────────────────────────────────────────────────┘
-                  │
-                  ▼
+     │
+     ▼
 ┌────────────────────────────────────────────────────────────────────┐
 │ Orchestration                                                      │
 │   src/pipeline/daily_pipeline.py    (CLI, Docker, or cron entry)   │
 └────────────────────────────────────────────────────────────────────┘
-                  │
-                  ▼
+     │
+     ▼
 ┌────────────────────────────────────────────────────────────────────┐
 │ Ingestion                                                          │
 │   ingest_nvd.py | ingest_nvd_modified.py | ingest_kev.py |         │
@@ -85,10 +85,9 @@ per `score_date`. Gold tables are partitioned by `snapshot_date`, so
 historical runs are preserved and re-running the pipeline only overwrites
 the current day's partition.
 
-When the project runs in Docker, the same pipeline code executes through
-the `pipeline` service and the Streamlit app is exposed through the `app`
-service. Both services share the same image and persist their outputs under
-`./data`.
+When the project runs in Docker, the `pipeline` service executes the
+pipeline code and the `app` service exposes the Streamlit app. Both
+services share the same image and write their outputs to `./data`.
 
 ---
 
@@ -100,7 +99,7 @@ service. Both services share the same image and persist their outputs under
 | **CISA KEV** (Known Exploited Vulnerabilities) | CSV, single snapshot | Weekdays, US business hours, ad-hoc (avg ~1/day) | ~1.5 K CVEs cumulative | Ground-truth flag for actively exploited CVEs |
 | **EPSS** (Exploit Prediction Scoring System) | gzipped CSV, daily snapshot | Once per day | ~250 K rows per snapshot | Probabilistic exploit-likelihood score |
 
-All three are public, free and stable.
+All three are public, free, and stable.
 
 ---
 
@@ -165,26 +164,27 @@ cd Big-Data-Technologies-Project
 - Python 3.10 or 3.11
 - Java 11 or 17 (PySpark requirement; `brew install openjdk@17` on macOS)
 - ~8 GB RAM (the Spark session is tuned for this; see `src/config.py`)
-- ~2 GB disk for raw + silver + gold across a 12-year window
+- ≥8 CPU Cores
 - Docker Desktop or Docker Engine with Docker Compose v2, if you want to
-  use the containerized workflow instead of running locally
+  use the containerized workflow
 
 ### Running with Docker Compose
 
 Docker Compose is the recommended way to run the project locally.
+Make sure Docker is running before you launch any of the commands below.
 
 Recommended commands:
 
 | Situation | Command |
 |---|---|
-| First time, or after changing the image | `docker compose up --build app` |
-| Start the app again after the image is already built | `docker compose up app` |
+| First run, or after rebuilding the image | `docker compose up --build -d` |
+| Start the app after the image is already built | `docker compose up app` |
 | Run the pipeline with arguments | `docker compose run --rm pipeline` |
 
-Build and start the app in one step:
+Build and launch in one step:
 
 ```bash
-docker compose up --build app
+docker compose up --build -d
 ```
 
 Start the app again after the image is already built:
@@ -211,7 +211,6 @@ The pipeline also accepts these arguments:
 | `--full-nvd-refresh` | `off` | `docker compose run --rm pipeline --full-nvd-refresh` | Re-downloads every yearly NVD feed instead of using the incremental modified feed. |
 | `--nvd-storage` | `delta` | `docker compose run --rm pipeline --nvd-storage parquet` | Chooses the storage format for NVD silver output. Use `delta` for the current default flow or `parquet` for legacy mode. |
 
-Both services reuse the same image and persist outputs under `./data`.
 The app is available at `http://localhost:8501`.
 
 To stop Docker Compose:
@@ -253,31 +252,7 @@ spark-submit src/processing/join_master.py
 streamlit run app/streamlit_app.py
 ```
 
-Opens at `http://localhost:8501` with five pages: Overview, Vulnerability
-Explorer, Cluster View, Capacity Simulator, Remediation Plan.
-
-### Running with Docker Directly
-
-If you prefer raw Docker commands, build the image once:
-
-```bash
-docker build -t vulnintel .
-```
-
-Run the app:
-
-```bash
-docker run --rm -it -p 8501:8501 -v "$(pwd)/data:/app/data" vulnintel
-```
-
-Run the pipeline:
-
-```bash
-docker run --rm -it -v "$(pwd)/data:/app/data" vulnintel pipeline 
-```
-
-The image already includes Python, Spark, and Java 17, so the host only
-needs Docker if you use this flow.
+Opens at `http://localhost:8501`.
 
 ### Daily scheduling with cron
 
@@ -298,7 +273,7 @@ You can schedule the pipeline in two ways:
 
 - **Docker / Docker Compose**
 
-  This version uses the image defined in `Dockerfile` and the service
+  This option uses the image defined in `Dockerfile` and the service
   configuration in `docker-compose.yml`, so it does not need the local
   `.venv` or `JAVA_HOME` setup. Docker Desktop or the Docker daemon must
   be running when the job fires.
