@@ -160,7 +160,7 @@ All three are public, free, and stable.
 ### Clone the repository
 
 ```bash
-git clone <repo>
+git clone https://github.com/crismorillo01/Big-Data-Technologies-Project.git
 cd Big-Data-Technologies-Project
 ```
 
