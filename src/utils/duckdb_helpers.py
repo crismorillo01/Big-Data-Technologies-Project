@@ -302,17 +302,29 @@ def remediation_actions(
 # Data quality
 # ---------------------------------------------------------------------------
 
-def data_quality_latest() -> pd.DataFrame:
-    """Return the most recent data-quality summary metrics."""
+def data_quality_summary(snapshot_date: str | None = None) -> pd.DataFrame:
+    """Return data-quality summary metrics for one snapshot.
+
+    Falls back to the latest available snapshot when the requested one is
+    missing, matching the behavior of the other dashboard helpers.
+    """
     summary_dir = GOLD_DATA_QUALITY_DIR / "summary"
-    if not summary_dir.exists():
+    actual = _resolve_snapshot(summary_dir, snapshot_date)
+    if not actual:
         return pd.DataFrame()
-    glob = str(summary_dir / "**" / "*.parquet")
+
+    partition = summary_dir / f"snapshot_date={actual}"
+    glob = str(partition / "*.parquet")
     sql = f"""
         SELECT *
         FROM read_parquet('{glob}', union_by_name=true)
     """
     return query_parquet(sql)
+
+
+def data_quality_latest() -> pd.DataFrame:
+    """Return the most recent data-quality summary metrics."""
+    return data_quality_summary(None)
 
 
 # ---------------------------------------------------------------------------

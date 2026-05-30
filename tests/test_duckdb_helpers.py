@@ -172,6 +172,64 @@ def test_strategy_comparison_filters_snapshot(monkeypatch, tmp_path):
     assert result["kev_coverage"].tolist() == [0.7, 0.3]
 
 
+def test_data_quality_summary_filters_snapshot(monkeypatch, tmp_path):
+    summary_dir = tmp_path / "data_quality" / "summary"
+    _write_snapshot(
+        summary_dir,
+        "2026-05-19",
+        [
+            {
+                "snapshot_date": "2026-05-19",
+                "row_count": 10,
+                "distinct_cve_count": 10,
+                "pct_null_cvss": 5.0,
+                "pct_null_epss": 10.0,
+                "pct_null_cwes": 15.0,
+                "pct_null_cpe": 20.0,
+                "pct_epss_gt_07": 25.0,
+                "pct_epss_gt_09": 30.0,
+                "mean_epss": 0.11,
+                "median_epss": 0.10,
+                "kev_count": 2,
+                "nvd_kev_intersection": 2,
+                "nvd_epss_intersection": 4,
+                "nvd_kev_epss_intersection": 1,
+            },
+        ],
+    )
+    _write_snapshot(
+        summary_dir,
+        "2026-05-20",
+        [
+            {
+                "snapshot_date": "2026-05-20",
+                "row_count": 12,
+                "distinct_cve_count": 12,
+                "pct_null_cvss": 1.0,
+                "pct_null_epss": 2.0,
+                "pct_null_cwes": 3.0,
+                "pct_null_cpe": 4.0,
+                "pct_epss_gt_07": 5.0,
+                "pct_epss_gt_09": 6.0,
+                "mean_epss": 0.21,
+                "median_epss": 0.20,
+                "kev_count": 3,
+                "nvd_kev_intersection": 3,
+                "nvd_epss_intersection": 5,
+                "nvd_kev_epss_intersection": 2,
+            },
+        ],
+    )
+
+    monkeypatch.setattr(duckdb_helpers, "GOLD_DATA_QUALITY_DIR", tmp_path / "data_quality")
+
+    result = duckdb_helpers.data_quality_summary("2026-05-20")
+
+    assert result["snapshot_date"].astype(str).tolist() == ["2026-05-20"]
+    assert result["kev_count"].tolist() == [3]
+    assert result["pct_null_cvss"].tolist() == [1.0]
+
+
 def test_remediation_recommendations_filters_strategy_and_snapshot(monkeypatch, tmp_path):
     recommendations_dir = tmp_path / "remediation_recommendations"
     _write_snapshot(

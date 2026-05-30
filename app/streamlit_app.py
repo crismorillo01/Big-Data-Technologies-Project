@@ -38,7 +38,7 @@ from src.config import (
 from src.utils.duckdb_helpers import (
     available_snapshots,
     cluster_overview,
-    data_quality_latest,
+    data_quality_summary,
     overview_stats,
     remediation_actions,
     remediation_recommendations,
@@ -337,8 +337,8 @@ def _remediation_actions(top_n, snapshot_date):
 
 
 @st.cache_data(ttl=300)
-def _data_quality():
-    return data_quality_latest()
+def _data_quality(snapshot_date):
+    return data_quality_summary(snapshot_date)
 
 
 @st.cache_data(ttl=300)
@@ -418,6 +418,10 @@ if "snapshot_mode" not in st.session_state:
     st.session_state.snapshot_mode = "Latest"
 if "snapshot_custom_date" not in st.session_state:
     st.session_state.snapshot_custom_date = snapshots[0] if snapshots else None
+if "snapshot_custom_date_widget" not in st.session_state:
+    st.session_state.snapshot_custom_date_widget = (
+        st.session_state.snapshot_custom_date if st.session_state.snapshot_custom_date else "(none)"
+    )
 
 
 def _snap_set_latest() -> None:
@@ -455,17 +459,13 @@ with _sc2:
 
 if st.session_state.snapshot_mode == "Custom":
     _snap_opts = snapshots if snapshots else ["(none)"]
-    # Restore previously chosen date if still in the list
-    _snap_default = 0
-    if st.session_state.snapshot_custom_date and _snap_opts[0] != "(none)":
-        _snap_strs = [str(s)[:10] for s in _snap_opts]
-        _prev = str(st.session_state.snapshot_custom_date)[:10]
-        if _prev in _snap_strs:
-            _snap_default = _snap_strs.index(_prev)
+    # Keep the widget state valid if the available snapshot list changes.
+    if st.session_state.snapshot_custom_date_widget not in _snap_opts:
+        st.session_state.snapshot_custom_date_widget = _snap_opts[0]
     _sel = st.sidebar.selectbox(
         "Available snapshots",
         options=_snap_opts,
-        index=_snap_default,
+        key="snapshot_custom_date_widget",
         format_func=lambda x: str(x)[:10],
         label_visibility="collapsed",
     )
@@ -547,7 +547,7 @@ if page == "Overview":
     st.caption(f"Snapshot: {snapshot_date or 'latest'}")
 
     full_df = _overview_stats(snapshot_date or "")
-    dq = _data_quality()
+    dq = _data_quality(snapshot_date)
 
     # Pre-compute KPIs used in multiple places
     n_total = len(full_df) if not full_df.empty else 0
