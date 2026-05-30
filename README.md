@@ -85,9 +85,14 @@ per `score_date`. Gold tables are partitioned by `snapshot_date`, so
 historical runs are preserved and re-running the pipeline only overwrites
 the current day's partition.
 
-When the project runs in Docker, the `pipeline` service executes the
-pipeline code and the `app` service exposes the Streamlit app. Both
-services share the same image and write their outputs to `./data`.
+The project is built as a batch pipeline because its core goal is to model
+the daily remediation capacity of an organization: how many vulnerabilities
+can realistically be resolved in one day. That makes a batch run a better
+fit than streaming, especially because the upstream datasets are updated at
+snapshot or feed intervals rather than continuously. NVD is the most
+frequent source, but even though its feeds refresh every two hours, they do
+not always contain new changes, and the number of new daily entries is small
+compared with the full catalog.
 
 ---
 
@@ -172,6 +177,9 @@ cd Big-Data-Technologies-Project
 
 Docker Compose is the recommended way to run the project locally.
 Make sure Docker is running before you launch any of the commands below.
+The `pipeline` service runs the pipeline code and the `app` service serves
+the Streamlit UI. Both services share the same image and write their
+outputs to `./data`.
 
 Recommended commands:
 
