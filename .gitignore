@@ -62,3 +62,6 @@ tmp/
 
 # ---- Claude Code (AI assistant local files — never commit) -----------------
 .claude/
+
+# ---- Personal exam preparation (local only — never commit) -----------------
+Exam_plus_matherials/
